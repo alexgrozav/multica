@@ -103,8 +103,14 @@ func ensureWorktree(bare, worktreePath, branch string) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(worktreePath), 0o755); err != nil {
 		return "", err
 	}
+	// Clear any half-registered worktree admin entry left by a prior failed add.
+	_, _ = runGit(bare, "worktree", "prune")
 	base := resolveBaseRef(bare)
-	if out, err := runGit(bare, "worktree", "add", "-B", branch, worktreePath, base); err != nil {
+	// branch.autoSetupMerge=false: the issue/* branch must NOT track origin/<base>.
+	// Writing upstream config is both wrong here (an issue branch shouldn't push
+	// to main) and the operation that contended on config.lock when the daemon's
+	// agent-task worktree creation ran on the same bare repo concurrently.
+	if out, err := runGit(bare, "-c", "branch.autoSetupMerge=false", "worktree", "add", "-B", branch, worktreePath, base); err != nil {
 		return "", fmt.Errorf("git worktree add: %s: %w", strings.TrimSpace(out), err)
 	}
 	return branch, nil

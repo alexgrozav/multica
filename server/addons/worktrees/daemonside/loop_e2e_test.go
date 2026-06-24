@@ -5,6 +5,7 @@ package daemonside
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -100,6 +101,52 @@ func TestDaemonWorktreeLifecycleE2E(t *testing.T) {
 	}
 	if st := fake.lastStatus(t); st.Kind != shared.JobCleanup || st.Status != shared.StatusRemoved {
 		t.Fatalf("cleanup status report = %+v, want removed", st)
+	}
+}
+
+// TestConcurrentInitSameRepo guards the config.lock race: many worktrees being
+// initialized for the SAME bare repo at once (e.g. several tasks created
+// together) must all succeed, not collide on git's lockfiles.
+func TestConcurrentInitSameRepo(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	origin := initOriginRepo(t)
+	fake := newFakeServer()
+	defer fake.srv.Close()
+
+	m := New(Deps{
+		ServerBaseURL:  fake.srv.URL,
+		WorkspacesRoot: t.TempDir(),
+		DaemonID:       "daemon-conc",
+		TokenProvider:  func() string { return "test-token" },
+	})
+
+	const ws = "ws-conc"
+	const n = 6
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		issue := fmt.Sprintf("%08d-1111-2222-3333-444444444444", i)
+		go func(issue string) {
+			defer wg.Done()
+			m.handleInit(context.Background(), shared.Job{
+				Kind: shared.JobInit, WorktreeID: "wt-" + issue, IssueID: issue,
+				WorkspaceID: ws, RepoURL: origin,
+			})
+		}(issue)
+	}
+	wg.Wait()
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.statuses) != n {
+		t.Fatalf("got %d init reports, want %d", len(fake.statuses), n)
+	}
+	for _, st := range fake.statuses {
+		if st.Status != shared.StatusReady {
+			t.Fatalf("init status = %q (err %q); want ready — config.lock race?", st.Status, st.Error)
+		}
 	}
 }
 

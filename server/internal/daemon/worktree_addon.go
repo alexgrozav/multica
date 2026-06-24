@@ -42,6 +42,9 @@ func (d *Daemon) startWorktreeAddon(ctx context.Context) {
 			}
 			return d.repoCache.Lookup(workspaceID, repoURL), nil
 		}
+		// Reuse the daemon's own per-repo lock so our worktree adds serialize
+		// with the daemon's agent-task worktree creation on the same bare clone.
+		deps.WithRepoLock = d.repoCache.WithRepoLock
 	}
 	worktreesdaemon.New(deps).Run(ctx)
 }

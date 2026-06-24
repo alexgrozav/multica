@@ -42,6 +42,11 @@ type Deps struct {
 	// EnsureBare clones/fetches the repo into the daemon's cache and returns the
 	// bare path. Optional (nil → self-clone into the add-on's own cache dir).
 	EnsureBare func(workspaceID, repoURL string) (string, error)
+	// WithRepoLock serializes git mutations on a bare repo. MUST be the daemon's
+	// own repo lock so our worktree adds don't race the daemon's agent-task
+	// worktree creation on the same bare clone (git's config.lock/packed-refs.lock
+	// can't tolerate parallel mutation). Optional (nil → a local per-repo mutex).
+	WithRepoLock func(barePath string, fn func() error) error
 
 	// PollInterval defaults to 5s when zero.
 	PollInterval time.Duration
@@ -54,6 +59,7 @@ type Module struct {
 	httpC   *http.Client
 	mu      sync.Mutex
 	running map[string]context.CancelFunc // worktreeID -> cancel of the active Run
+	locks   sync.Map                      // bare/cache path -> *sync.Mutex (fallback when WithRepoLock is nil)
 }
 
 // New constructs the module from its dependencies.

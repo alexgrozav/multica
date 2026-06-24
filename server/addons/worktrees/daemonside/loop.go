@@ -66,8 +66,15 @@ func (m *Module) handleInit(ctx context.Context, job shared.Job) {
 		return
 	}
 	wtPath := m.worktreePath(job)
-	actualBranch, err := ensureWorktree(bare, wtPath, m.branchName(job))
-	if err != nil {
+	// Serialize worktree creation on the bare repo (shared with the daemon's
+	// agent-task worktree creation) — git's config/packed-refs locks can't
+	// tolerate parallel mutation on the same bare clone.
+	var actualBranch string
+	if err := m.withRepoLock(bare, func() error {
+		b, e := ensureWorktree(bare, wtPath, m.branchName(job))
+		actualBranch = b
+		return e
+	}); err != nil {
 		m.reportInitError(ctx, job, "create worktree: "+err.Error())
 		return
 	}
@@ -188,7 +195,10 @@ func (m *Module) handleCleanup(ctx context.Context, job shared.Job) {
 		})
 	}
 	if bare, err := m.barePath(job.WorkspaceID, job.RepoURL); err == nil {
-		removeWorktree(bare, wtPath, m.branchName(job))
+		_ = m.withRepoLock(bare, func() error {
+			removeWorktree(bare, wtPath, m.branchName(job))
+			return nil
+		})
 	} else {
 		_ = os.RemoveAll(wtPath)
 	}
@@ -242,6 +252,10 @@ func (m *Module) barePath(wsID, repoURL string) (string, error) {
 
 func (m *Module) selfClone(wsID, repoURL string) (string, error) {
 	dir := filepath.Join(m.deps.WorkspacesRoot, ".issue-worktrees-cache", wsID, repoName(repoURL)+".git")
+	// Serialize concurrent clones/fetches of the same self-managed cache dir.
+	mu := m.localLock(dir)
+	mu.Lock()
+	defer mu.Unlock()
 	if isGitDir(dir) {
 		_, _ = runGit(dir, "fetch", "--all", "--prune")
 		return dir, nil
@@ -253,6 +267,24 @@ func (m *Module) selfClone(wsID, repoURL string) (string, error) {
 		return "", fmt.Errorf("clone bare: %s: %w", strings.TrimSpace(out), err)
 	}
 	return dir, nil
+}
+
+// withRepoLock serializes git mutations on a bare repo: the daemon's own repo
+// lock when provided (so we don't race agent-task worktree creation), otherwise
+// a local per-path mutex.
+func (m *Module) withRepoLock(bare string, fn func() error) error {
+	if m.deps.WithRepoLock != nil {
+		return m.deps.WithRepoLock(bare, fn)
+	}
+	mu := m.localLock(bare)
+	mu.Lock()
+	defer mu.Unlock()
+	return fn()
+}
+
+func (m *Module) localLock(key string) *sync.Mutex {
+	v, _ := m.locks.LoadOrStore(key, &sync.Mutex{})
+	return v.(*sync.Mutex)
 }
 
 func finalMarker(runStatus string, code int) string {

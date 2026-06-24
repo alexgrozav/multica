@@ -380,7 +380,9 @@ export class ApiClient {
     return res;
   }
 
-  private async fetch<T>(path: string, init?: RequestInit): Promise<T> {
+  // Public so out-of-tree add-on modules can reuse auth/baseURL/X-Workspace-ID
+  // handling instead of re-implementing the transport.
+  async fetch<T>(path: string, init?: RequestInit): Promise<T> {
     const res = await this.fetchRaw(path, {
       ...init,
       extraHeaders: { "Content-Type": "application/json" },

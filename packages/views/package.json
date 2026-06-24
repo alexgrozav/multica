@@ -62,6 +62,7 @@
     "@floating-ui/dom": "^1.7.6",
     "@multica/core": "workspace:*",
     "@multica/ui": "workspace:*",
+    "@multica/worktrees-addon": "workspace:*",
     "@tanstack/react-virtual": "catalog:",
     "@tiptap/core": "^3.22.1",
     "@tiptap/extension-code-block-lowlight": "^3.22.1",

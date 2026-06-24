@@ -60,6 +60,7 @@ import { ResolvedThreadBar } from "./resolved-thread-bar";
 import { collectThreadReplies, deriveThreadResolution } from "./thread-utils";
 import { IssueAgentHeaderChip } from "./issue-agent-header-chip";
 import { ExecutionLogSection } from "./execution-log-section";
+import { RunScriptsSection } from "@multica/worktrees-addon";
 import { PullRequestList } from "./pull-request-list";
 import { useGitHubSettings } from "@multica/core/github";
 import { useQuery } from "@tanstack/react-query";
@@ -1630,6 +1631,10 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
           owns its own collapse state and WS subscriptions. Hides itself
           when there are no runs to show. */}
       <ExecutionLogSection issueId={id} />
+
+      {/* Worktrees add-on: per-repo Setup/Run/Cleanup scripts + streaming logs.
+          Self-contained; hides itself when the issue has no worktrees. */}
+      <RunScriptsSection issueId={id} />
 
       {/* Token usage */}
       {usage && usage.task_count > 0 && (

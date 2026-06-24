@@ -170,6 +170,15 @@ func (s *Store) scripts(ctx context.Context, wsID, repoURL string) (setup, run, 
 	return setup, run, cleanup, err
 }
 
+// GetRepoScript returns the configured scripts for a repo (empty when none).
+func (s *Store) GetRepoScript(ctx context.Context, wsID, repoURL string) (shared.RepoScript, error) {
+	setup, run, cleanup, err := s.scripts(ctx, wsID, repoURL)
+	if err != nil {
+		return shared.RepoScript{}, err
+	}
+	return shared.RepoScript{RepoURL: repoURL, Setup: setup, Run: run, Cleanup: cleanup}, nil
+}
+
 // ---- Worktree rows ----
 
 // CreateWorktreeRow inserts a pending row (idempotent on issue+repo) and returns it.

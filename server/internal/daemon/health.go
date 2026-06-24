@@ -193,6 +193,15 @@ func (d *Daemon) serveHealth(ctx context.Context, ln net.Listener, startedAt tim
 			return
 		}
 
+		// worktrees add-on: run the repo's Setup script in the freshly checked-out
+		// worktree before returning, so the caller (e.g. an agent running
+		// `multica repo checkout`) waits and then works in a prepared environment.
+		if out, serr := d.runCheckoutSetup(r.Context(), req.WorkspaceID, req.URL, result.Path); serr != nil {
+			d.logger.Error("repo checkout setup failed", "url", req.URL, "error", serr)
+			http.Error(w, "setup script failed: "+serr.Error()+"\n"+out, http.StatusInternalServerError)
+			return
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(result)
 	})

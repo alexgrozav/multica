@@ -28,6 +28,7 @@ func (m *Module) UIRouter() http.Handler {
 func (m *Module) DaemonRouter() http.Handler {
 	r := chi.NewRouter()
 	r.Get("/jobs", m.handlePollJobs)
+	r.Get("/scripts", m.handleGetScripts)
 	r.Post("/jobs/{worktreeId}/status", m.handleReportStatus)
 	r.Post("/runs/{runTaskId}/logs", m.handleRunLogs)
 	return r
@@ -169,6 +170,27 @@ func (m *Module) handlePollJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, shared.JobsResponse{Jobs: append(jobs, actions...)})
+}
+
+// handleGetScripts returns a repo's configured scripts, so the daemon can run
+// the Setup script when the agent checks out the repo into its own worktree.
+func (m *Module) handleGetScripts(w http.ResponseWriter, r *http.Request) {
+	wsID := r.URL.Query().Get("workspace_id")
+	repoURL := r.URL.Query().Get("repo_url")
+	if wsID == "" || repoURL == "" {
+		writeErr(w, http.StatusBadRequest, "missing workspace_id or repo_url")
+		return
+	}
+	if !m.canAccess(r, wsID) {
+		writeErr(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	rs, err := m.store.GetRepoScript(r.Context(), wsID, repoURL)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to load scripts")
+		return
+	}
+	writeJSON(w, http.StatusOK, rs)
 }
 
 func (m *Module) handleReportStatus(w http.ResponseWriter, r *http.Request) {

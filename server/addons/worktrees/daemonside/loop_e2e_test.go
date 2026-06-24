@@ -150,18 +150,71 @@ func TestConcurrentInitSameRepo(t *testing.T) {
 	}
 }
 
+// TestRunRepoSetup covers the checkout Setup hook: it fetches the configured
+// Setup script and runs it in the worktree, reports ran/failure correctly.
+func TestRunRepoSetup(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	fake := newFakeServer()
+	defer fake.srv.Close()
+	params := func(dir string) SetupParams {
+		return SetupParams{
+			ServerBaseURL: fake.srv.URL, TokenProvider: func() string { return "t" },
+			DaemonID: "d", WorkspaceID: "ws", RepoURL: "r", WorktreePath: dir,
+		}
+	}
+
+	// configured setup runs in the worktree
+	fake.setScript(shared.RepoScript{Setup: "echo HELLO > setup-ran.txt"})
+	dir := t.TempDir()
+	ran, err := RunRepoSetup(context.Background(), params(dir), func(string, string) {})
+	if !ran || err != nil {
+		t.Fatalf("RunRepoSetup = ran %v err %v, want ran/nil", ran, err)
+	}
+	if _, e := os.Stat(filepath.Join(dir, "setup-ran.txt")); e != nil {
+		t.Fatalf("setup script did not run in the worktree: %v", e)
+	}
+
+	// no setup configured → no-op
+	fake.setScript(shared.RepoScript{})
+	if ran, err := RunRepoSetup(context.Background(), params(t.TempDir()), func(string, string) {}); ran || err != nil {
+		t.Fatalf("empty setup = ran %v err %v, want false/nil", ran, err)
+	}
+
+	// failing setup → ran=true + error (caller fails the checkout)
+	fake.setScript(shared.RepoScript{Setup: "exit 7"})
+	if ran, err := RunRepoSetup(context.Background(), params(t.TempDir()), func(string, string) {}); !ran || err == nil {
+		t.Fatalf("failing setup = ran %v err %v, want true/error", ran, err)
+	}
+}
+
 // --- fake server ---
 
 type fakeServer struct {
 	mu       sync.Mutex
 	statuses []shared.StatusReport
 	logs     []shared.LogLine
+	script   shared.RepoScript
 	srv      *httptest.Server
+}
+
+func (f *fakeServer) setScript(s shared.RepoScript) {
+	f.mu.Lock()
+	f.script = s
+	f.mu.Unlock()
 }
 
 func newFakeServer() *fakeServer {
 	f := &fakeServer{}
 	mux := http.NewServeMux()
+	mux.HandleFunc("/api/daemon/worktree/scripts", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		s := f.script
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(s)
+	})
 	mux.HandleFunc("/api/daemon/worktree/jobs/", func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/status") {
 			var rep shared.StatusReport

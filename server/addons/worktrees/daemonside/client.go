@@ -81,3 +81,11 @@ func (c *client) reportStatus(ctx context.Context, worktreeID string, rep shared
 func (c *client) postLogs(ctx context.Context, runTaskID string, lines []shared.LogLine) error {
 	return c.do(ctx, http.MethodPost, "/api/daemon/worktree/runs/"+runTaskID+"/logs", shared.LogBatch{Lines: lines}, nil)
 }
+
+// fetchScripts returns a repo's configured scripts (for the checkout Setup hook).
+func (c *client) fetchScripts(ctx context.Context, workspaceID, repoURL string) (shared.RepoScript, error) {
+	var out shared.RepoScript
+	q := url.Values{"workspace_id": {workspaceID}, "repo_url": {repoURL}}
+	err := c.do(ctx, http.MethodGet, "/api/daemon/worktree/scripts?"+q.Encode(), nil, &out)
+	return out, err
+}

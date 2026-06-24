@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"strings"
 
 	worktreesdaemon "github.com/multica-ai/multica/server/addons/worktrees/daemonside"
 	"github.com/multica-ai/multica/server/internal/daemon/repocache"
@@ -47,4 +48,39 @@ func (d *Daemon) startWorktreeAddon(ctx context.Context) {
 		deps.WithRepoLock = d.repoCache.WithRepoLock
 	}
 	worktreesdaemon.New(deps).Run(ctx)
+}
+
+// runCheckoutSetup runs the worktrees add-on's per-repo Setup script in a
+// freshly checked-out worktree (the agent's own worktree), before the checkout
+// returns — so an agent that runs `multica repo checkout` waits for Setup and
+// then works in a prepared environment. Returns the captured output and an
+// error only when the Setup script itself fails (the caller fails the
+// checkout). A missing daemon repo cache or an unreachable add-on endpoint is
+// treated as "no setup" so checkouts are never blocked by add-on issues.
+func (d *Daemon) runCheckoutSetup(ctx context.Context, workspaceID, repoURL, worktreePath string) (string, error) {
+	var buf strings.Builder
+	ran, err := worktreesdaemon.RunRepoSetup(ctx, worktreesdaemon.SetupParams{
+		ServerBaseURL: d.cfg.ServerBaseURL,
+		TokenProvider: func() string { return d.client.Token() },
+		DaemonID:      d.cfg.DaemonID,
+		WorkspaceID:   workspaceID,
+		RepoURL:       repoURL,
+		WorktreePath:  worktreePath,
+	}, func(stream, text string) {
+		buf.WriteString(text)
+		buf.WriteByte('\n')
+		d.logger.Debug("checkout setup", "repo", repoURL, "stream", stream, "line", text)
+	})
+	if err != nil {
+		if !ran {
+			// Fetch/transport failure — don't block the checkout; just skip Setup.
+			d.logger.Warn("worktrees: could not fetch setup script; skipping", "repo", repoURL, "error", err)
+			return "", nil
+		}
+		return buf.String(), err
+	}
+	if ran {
+		d.logger.Info("worktrees: setup script completed", "repo", repoURL, "worktree", worktreePath)
+	}
+	return buf.String(), nil
 }

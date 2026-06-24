@@ -34,6 +34,7 @@ func TestDaemonWorktreeLifecycleE2E(t *testing.T) {
 	m := New(Deps{
 		ServerBaseURL:  fake.srv.URL,
 		WorkspacesRoot: root,
+		DaemonID:       "daemon-e2e",
 		TokenProvider:  func() string { return "test-token" },
 		// LookupBare/EnsureBare nil → self-clone path is exercised.
 	})
@@ -60,6 +61,16 @@ func TestDaemonWorktreeLifecycleE2E(t *testing.T) {
 	}
 	if st := fake.lastStatus(t); st.Kind != shared.JobInit || st.Status != shared.StatusReady || st.SetupStatus != shared.ScriptSucceeded {
 		t.Fatalf("init status report = %+v, want ready + setup succeeded", st)
+	}
+
+	// 1b) RE-RUN SETUP — appends to the marker; streams to the run channel and
+	//     reports only setup_status (not worktree status).
+	m.handleSetup(context.Background(), shared.Job{
+		Kind: shared.JobSetup, WorktreeID: wtID, IssueID: issue, WorkspaceID: ws,
+		RepoURL: origin, RunTaskID: "setup-rerun-1", Setup: "echo RESETUP_OK >> marker.txt",
+	})
+	if st := fake.lastStatus(t); st.Kind != shared.JobSetup || st.SetupStatus != shared.ScriptSucceeded {
+		t.Fatalf("re-run setup status report = %+v, want setup succeeded", st)
 	}
 
 	// 2) RUN — proves it executes in the persistent worktree (reads marker.txt)

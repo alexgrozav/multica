@@ -18,9 +18,19 @@ func (d *Daemon) startWorktreeAddon(ctx context.Context) {
 	deps := worktreesdaemon.Deps{
 		ServerBaseURL:  d.cfg.ServerBaseURL,
 		WorkspacesRoot: d.cfg.WorkspacesRoot,
+		DaemonID:       d.cfg.DaemonID,
 		Logger:         d.logger,
 		RootCtx:        d.rootCtx,
 		TokenProvider:  func() string { return d.client.Token() },
+		ListWorkspaces: func() []string {
+			d.mu.Lock()
+			defer d.mu.Unlock()
+			ids := make([]string, 0, len(d.workspaces))
+			for id := range d.workspaces {
+				ids = append(ids, id)
+			}
+			return ids
+		},
 	}
 	if d.repoCache != nil {
 		deps.LookupBare = func(workspaceID, repoURL string) string {

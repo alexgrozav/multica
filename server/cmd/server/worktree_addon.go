@@ -53,11 +53,28 @@ func worktreeAddon(pool *pgxpool.Pool, bus *events.Bus) *worktreesserver.Module 
 					Role:        role,
 				}, true
 			},
-			DaemonWorkspaceID: func(r *http.Request) string {
-				return middleware.DaemonWorkspaceIDFromContext(r.Context())
-			},
-			DaemonID: func(r *http.Request) string {
-				return middleware.DaemonIDFromContext(r.Context())
+			CanAccessWorkspace: func(r *http.Request, workspaceID string) bool {
+				if workspaceID == "" {
+					return false
+				}
+				// Daemon-token (mdt_) path: the token is bound to a workspace.
+				if dws := middleware.DaemonWorkspaceIDFromContext(r.Context()); dws != "" {
+					return dws == workspaceID
+				}
+				// PAT/JWT path (e.g. a local daemon using a mul_ user token):
+				// the authenticated user must be a member of the workspace.
+				userID := r.Header.Get("X-User-ID")
+				if userID == "" {
+					return false
+				}
+				var ok bool
+				if err := pool.QueryRow(r.Context(),
+					`SELECT EXISTS(SELECT 1 FROM member WHERE workspace_id=$1 AND user_id=$2)`,
+					workspaceID, userID).Scan(&ok); err != nil {
+					slog.Warn("worktrees: workspace access check failed", "error", err)
+					return false
+				}
+				return ok
 			},
 			Logger: slog.Default(),
 		})

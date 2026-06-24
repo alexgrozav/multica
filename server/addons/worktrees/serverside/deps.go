@@ -58,10 +58,13 @@ type Deps struct {
 
 	// Principal extraction on member-authenticated routes.
 	Principal func(r *http.Request) (Principal, bool)
-	// DaemonWorkspaceID returns the workspace bound to the daemon token (or "").
-	DaemonWorkspaceID func(r *http.Request) string
-	// DaemonID returns the authenticated daemon's id (the worktree owner).
-	DaemonID func(r *http.Request) string
+	// CanAccessWorkspace authorizes a daemon-authenticated request for a
+	// workspace. The daemon sends workspace_id + daemon_id as query params (it
+	// knows both from registration), so we do NOT depend on a token-bound
+	// workspace — that only exists on the mdt_ daemon-token path, and a local
+	// daemon often authenticates with a mul_ user PAT instead. The adapter
+	// implements the same check the host uses (daemon-token match OR membership).
+	CanAccessWorkspace func(r *http.Request, workspaceID string) bool
 
 	// Redact strips secrets from streamed log text. Identity if nil.
 	Redact func(string) string

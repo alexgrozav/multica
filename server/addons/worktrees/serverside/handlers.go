@@ -15,6 +15,7 @@ import (
 func (m *Module) UIRouter() http.Handler {
 	r := chi.NewRouter()
 	r.Get("/issues/{issueId}", m.handleListWorktrees)
+	r.Post("/issues/{issueId}/{worktreeId}/setup", m.handleSetup)
 	r.Post("/issues/{issueId}/{worktreeId}/run", m.handleRun)
 	r.Post("/issues/{issueId}/{worktreeId}/run/stop", m.handleStop)
 	r.Get("/config", m.handleGetConfig)
@@ -46,6 +47,23 @@ func (m *Module) handleListWorktrees(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, wts)
+}
+
+func (m *Module) handleSetup(w http.ResponseWriter, r *http.Request) {
+	p, ok := m.principal(w, r)
+	if !ok {
+		return
+	}
+	wt, ok := m.loadOwnedWorktree(w, r, p)
+	if !ok {
+		return
+	}
+	out, err := m.store.RequestSetup(r.Context(), wt.ID)
+	if err != nil {
+		writeWorktreeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (m *Module) handleRun(w http.ResponseWriter, r *http.Request) {
@@ -124,9 +142,17 @@ func (m *Module) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 // ---- Daemon handlers ----
 
 func (m *Module) handlePollJobs(w http.ResponseWriter, r *http.Request) {
-	wsID, daemonID := m.daemonPrincipal(r)
+	// The daemon sends its identity explicitly (it knows both from
+	// registration) so this works on every auth path — including a mul_ user
+	// PAT, where the token-bound daemon-workspace/daemon-id context is empty.
+	wsID := r.URL.Query().Get("workspace_id")
+	daemonID := r.URL.Query().Get("daemon_id")
 	if wsID == "" || daemonID == "" {
-		writeErr(w, http.StatusUnauthorized, "unauthorized daemon")
+		writeErr(w, http.StatusBadRequest, "missing workspace_id or daemon_id")
+		return
+	}
+	if !m.canAccess(r, wsID) {
+		writeErr(w, http.StatusForbidden, "forbidden")
 		return
 	}
 	if err := m.store.TouchDaemon(r.Context(), wsID, daemonID); err != nil {
@@ -146,9 +172,18 @@ func (m *Module) handlePollJobs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *Module) handleReportStatus(w http.ResponseWriter, r *http.Request) {
-	_, daemonID := m.daemonPrincipal(r)
+	daemonID := r.URL.Query().Get("daemon_id")
 	if daemonID == "" {
-		writeErr(w, http.StatusUnauthorized, "unauthorized daemon")
+		writeErr(w, http.StatusBadRequest, "missing daemon_id")
+		return
+	}
+	wt, err := m.store.Get(r.Context(), chi.URLParam(r, "worktreeId"))
+	if err != nil {
+		writeWorktreeErr(w, err)
+		return
+	}
+	if !m.canAccess(r, wt.WorkspaceID) {
+		writeErr(w, http.StatusForbidden, "forbidden")
 		return
 	}
 	var rep shared.StatusReport
@@ -156,21 +191,16 @@ func (m *Module) handleReportStatus(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid body")
 		return
 	}
-	wt, err := m.store.ReportStatus(r.Context(), daemonID, chi.URLParam(r, "worktreeId"), rep)
+	updated, err := m.store.ReportStatus(r.Context(), daemonID, wt.ID, rep)
 	if err != nil {
 		writeWorktreeErr(w, err)
 		return
 	}
-	m.publish(wt.WorkspaceID, shared.EventWorktreeUpdated, shared.UpdatedEvent{IssueID: wt.IssueID, Worktree: wt})
-	writeJSON(w, http.StatusOK, wt)
+	m.publish(updated.WorkspaceID, shared.EventWorktreeUpdated, shared.UpdatedEvent{IssueID: updated.IssueID, Worktree: updated})
+	writeJSON(w, http.StatusOK, updated)
 }
 
 func (m *Module) handleRunLogs(w http.ResponseWriter, r *http.Request) {
-	_, daemonID := m.daemonPrincipal(r)
-	if daemonID == "" {
-		writeErr(w, http.StatusUnauthorized, "unauthorized daemon")
-		return
-	}
 	runTaskID := chi.URLParam(r, "runTaskId")
 	var batch shared.LogBatch
 	if err := json.NewDecoder(r.Body).Decode(&batch); err != nil {
@@ -180,6 +210,10 @@ func (m *Module) handleRunLogs(w http.ResponseWriter, r *http.Request) {
 	wt, err := m.store.GetByRunTaskID(r.Context(), runTaskID)
 	if err != nil {
 		writeErr(w, http.StatusNotFound, "run not found")
+		return
+	}
+	if !m.canAccess(r, wt.WorkspaceID) {
+		writeErr(w, http.StatusForbidden, "forbidden")
 		return
 	}
 	for _, ln := range batch.Lines {
@@ -210,14 +244,8 @@ func (m *Module) principal(w http.ResponseWriter, r *http.Request) (Principal, b
 	return p, true
 }
 
-func (m *Module) daemonPrincipal(r *http.Request) (wsID, daemonID string) {
-	if m.deps.DaemonWorkspaceID != nil {
-		wsID = m.deps.DaemonWorkspaceID(r)
-	}
-	if m.deps.DaemonID != nil {
-		daemonID = m.deps.DaemonID(r)
-	}
-	return wsID, daemonID
+func (m *Module) canAccess(r *http.Request, workspaceID string) bool {
+	return m.deps.CanAccessWorkspace != nil && m.deps.CanAccessWorkspace(r, workspaceID)
 }
 
 // loadOwnedWorktree loads the path's worktree and verifies it belongs to the
@@ -259,6 +287,8 @@ func writeWorktreeErr(w http.ResponseWriter, err error) {
 		writeErr(w, http.StatusConflict, "worktree not ready")
 	case errors.Is(err, ErrNoRunScript):
 		writeErr(w, http.StatusConflict, "no run script configured")
+	case errors.Is(err, ErrNoSetupScript):
+		writeErr(w, http.StatusConflict, "no setup script configured")
 	case errors.Is(err, ErrDaemonOffline):
 		writeErr(w, http.StatusConflict, "owning machine offline")
 	case errors.Is(err, ErrAlreadyRunning):

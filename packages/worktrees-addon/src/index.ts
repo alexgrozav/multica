@@ -6,6 +6,7 @@ export {
   issueWorktreesOptions,
   useIssueWorktrees,
   useWorktreeRunLog,
+  useRunWorktreeSetup,
   useRunWorktreeScript,
   useStopWorktreeScript,
   useWorktreeConfig,

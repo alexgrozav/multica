@@ -26,6 +26,13 @@ type Deps struct {
 	// WorkspacesRoot is the daemon's local working-directory root.
 	WorkspacesRoot string
 
+	// DaemonID is this daemon's stable id. Sent to the server as the worktree
+	// owner and identity, so the endpoints work on any auth path (including a
+	// mul_ user PAT, where a token-bound daemon id is absent).
+	DaemonID string
+	// ListWorkspaces returns the workspace IDs this daemon currently watches.
+	ListWorkspaces func() []string
+
 	Logger  *slog.Logger
 	RootCtx context.Context
 
@@ -58,7 +65,7 @@ func New(deps Deps) *Module {
 	return &Module{
 		deps:    deps,
 		httpC:   hc,
-		cl:      &client{baseURL: deps.ServerBaseURL, token: deps.TokenProvider, hc: hc},
+		cl:      &client{baseURL: deps.ServerBaseURL, token: deps.TokenProvider, daemonID: deps.DaemonID, hc: hc},
 		running: map[string]context.CancelFunc{},
 	}
 }

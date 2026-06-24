@@ -44,6 +44,7 @@ const (
 // job queue carried on the row itself.
 const (
 	ActionNone    = ""
+	ActionSetup   = "setup"
 	ActionRun     = "run"
 	ActionStop    = "stop"
 	ActionCleanup = "cleanup"
@@ -52,6 +53,7 @@ const (
 // Job kinds the daemon polls for.
 const (
 	JobInit    = "init"
+	JobSetup   = "setup"
 	JobRun     = "run"
 	JobStop    = "stop"
 	JobCleanup = "cleanup"
@@ -66,21 +68,22 @@ const (
 // Worktree is the API representation of an issue_worktree row, returned to the
 // UI and embedded in worktree:updated events.
 type Worktree struct {
-	ID            string `json:"id"`
-	IssueID       string `json:"issue_id"`
-	WorkspaceID   string `json:"workspace_id"`
-	RepoURL       string `json:"repo_url"`
-	OwnerDaemonID string `json:"owner_daemon_id,omitempty"`
-	Path          string `json:"path"`
-	Branch        string `json:"branch"`
-	Status        string `json:"status"`
-	SetupStatus   string `json:"setup_status"`
-	RunStatus     string `json:"run_status"`
-	RunTaskID     string `json:"run_task_id,omitempty"`
-	HasRunScript  bool   `json:"has_run_script"`
-	LastError     string `json:"last_error,omitempty"`
-	CreatedAt     string `json:"created_at"`
-	UpdatedAt     string `json:"updated_at"`
+	ID             string `json:"id"`
+	IssueID        string `json:"issue_id"`
+	WorkspaceID    string `json:"workspace_id"`
+	RepoURL        string `json:"repo_url"`
+	OwnerDaemonID  string `json:"owner_daemon_id,omitempty"`
+	Path           string `json:"path"`
+	Branch         string `json:"branch"`
+	Status         string `json:"status"`
+	SetupStatus    string `json:"setup_status"`
+	RunStatus      string `json:"run_status"`
+	RunTaskID      string `json:"run_task_id,omitempty"`
+	HasRunScript   bool   `json:"has_run_script"`
+	HasSetupScript bool   `json:"has_setup_script"`
+	LastError      string `json:"last_error,omitempty"`
+	CreatedAt      string `json:"created_at"`
+	UpdatedAt      string `json:"updated_at"`
 }
 
 // Job is one unit of work the daemon claims from the poll endpoint. The server

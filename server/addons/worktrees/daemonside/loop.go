@@ -28,24 +28,35 @@ func (m *Module) Run(ctx context.Context) {
 }
 
 func (m *Module) pollOnce(ctx context.Context) {
-	resp, err := m.cl.poll(ctx)
-	if err != nil {
-		m.log().Debug("worktrees: poll failed", "error", err)
-		return
-	}
-	for _, job := range resp.Jobs {
-		job := job
-		switch job.Kind {
-		case shared.JobInit:
-			go m.handleInit(ctx, job)
-		case shared.JobRun:
-			go m.handleRun(ctx, job)
-		case shared.JobStop:
-			m.handleStop(job)
-		case shared.JobCleanup:
-			go m.handleCleanup(ctx, job)
+	for _, wsID := range m.workspaces() {
+		resp, err := m.cl.poll(ctx, wsID)
+		if err != nil {
+			m.log().Debug("worktrees: poll failed", "workspace_id", wsID, "error", err)
+			continue
+		}
+		for _, job := range resp.Jobs {
+			job := job
+			switch job.Kind {
+			case shared.JobInit:
+				go m.handleInit(ctx, job)
+			case shared.JobSetup:
+				go m.handleSetup(ctx, job)
+			case shared.JobRun:
+				go m.handleRun(ctx, job)
+			case shared.JobStop:
+				m.handleStop(job)
+			case shared.JobCleanup:
+				go m.handleCleanup(ctx, job)
+			}
 		}
 	}
+}
+
+func (m *Module) workspaces() []string {
+	if m.deps.ListWorkspaces == nil {
+		return nil
+	}
+	return m.deps.ListWorkspaces()
 }
 
 func (m *Module) handleInit(ctx context.Context, job shared.Job) {
@@ -125,6 +136,38 @@ func (m *Module) handleRun(ctx context.Context, job shared.Job) {
 		RunStatus: runStatus,
 		ExitCode:  &code,
 		Error:     errMsg,
+	})
+}
+
+// handleSetup re-runs the Setup script in an existing worktree, streaming its
+// output to the run channel (so it shows in the same sidebar log viewer) and
+// reporting the setup_status outcome.
+func (m *Module) handleSetup(ctx context.Context, job shared.Job) {
+	wtPath := m.worktreePath(job)
+	stream := newLogStreamer(ctx, m.cl, job.RunTaskID)
+	stopFlush := stream.start()
+
+	code, runErr := runScript(ctx, wtPath, job.Setup, m.scriptEnv(job, wtPath), stream.add)
+
+	setupStatus, errMsg := shared.ScriptSucceeded, ""
+	switch {
+	case runErr != nil:
+		setupStatus, errMsg = shared.ScriptFailed, runErr.Error()
+	case code != 0:
+		setupStatus, errMsg = shared.ScriptFailed, fmt.Sprintf("setup exited with code %d", code)
+	}
+	if setupStatus == shared.ScriptSucceeded {
+		stream.add(shared.StreamStderr, "[multica] setup finished")
+	} else {
+		stream.add(shared.StreamStderr, fmt.Sprintf("[multica] setup failed (exit %d)", code))
+	}
+	stopFlush()
+
+	_ = m.cl.reportStatus(ctx, job.WorktreeID, shared.StatusReport{
+		Kind:        shared.JobSetup,
+		SetupStatus: setupStatus,
+		ExitCode:    &code,
+		Error:       errMsg,
 	})
 }
 

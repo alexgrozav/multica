@@ -7,16 +7,19 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 
 	"github.com/multica-ai/multica/server/addons/worktrees/shared"
 )
 
 // client talks to the add-on's daemon-authenticated server endpoints, reusing
-// the daemon's bearer token (provided fresh per request).
+// the daemon's bearer token (provided fresh per request). It identifies itself
+// with daemonID via query params so the endpoints work on any auth path.
 type client struct {
-	baseURL string
-	token   func() string
-	hc      *http.Client
+	baseURL  string
+	token    func() string
+	daemonID string
+	hc       *http.Client
 }
 
 func (c *client) authToken() string {
@@ -60,16 +63,18 @@ func (c *client) do(ctx context.Context, method, path string, body any, out any)
 	return nil
 }
 
-// poll claims jobs for this daemon's workspace.
-func (c *client) poll(ctx context.Context) (shared.JobsResponse, error) {
+// poll claims jobs for the given workspace.
+func (c *client) poll(ctx context.Context, workspaceID string) (shared.JobsResponse, error) {
 	var out shared.JobsResponse
-	err := c.do(ctx, http.MethodGet, "/api/daemon/worktree/jobs", nil, &out)
+	q := url.Values{"workspace_id": {workspaceID}, "daemon_id": {c.daemonID}}
+	err := c.do(ctx, http.MethodGet, "/api/daemon/worktree/jobs?"+q.Encode(), nil, &out)
 	return out, err
 }
 
-// reportStatus reports the outcome of an init/run/cleanup job.
+// reportStatus reports the outcome of an init/setup/run/cleanup job.
 func (c *client) reportStatus(ctx context.Context, worktreeID string, rep shared.StatusReport) error {
-	return c.do(ctx, http.MethodPost, "/api/daemon/worktree/jobs/"+worktreeID+"/status", rep, nil)
+	q := url.Values{"daemon_id": {c.daemonID}}
+	return c.do(ctx, http.MethodPost, "/api/daemon/worktree/jobs/"+worktreeID+"/status?"+q.Encode(), rep, nil)
 }
 
 // postLogs streams a batch of run-output lines.

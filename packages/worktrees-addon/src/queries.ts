@@ -62,6 +62,29 @@ export function useRunWorktreeScript(issueId: string) {
   });
 }
 
+export function useRunWorktreeSetup(issueId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (worktreeId: string) => wapi.runWorktreeSetup(issueId, worktreeId),
+    onMutate: async (worktreeId) => {
+      await qc.cancelQueries({ queryKey: worktreeKeys.list(issueId) });
+      const prev = qc.getQueryData<IssueWorktree[]>(worktreeKeys.list(issueId));
+      qc.setQueryData<IssueWorktree[]>(worktreeKeys.list(issueId), (old = []) =>
+        old.map((w) => (w.id === worktreeId ? { ...w, setup_status: "running" } : w)),
+      );
+      return { prev };
+    },
+    onError: (_e, _v, ctx) => {
+      if (ctx?.prev) qc.setQueryData(worktreeKeys.list(issueId), ctx.prev);
+    },
+    onSuccess: (updated) => {
+      qc.setQueryData<IssueWorktree[]>(worktreeKeys.list(issueId), (old = []) =>
+        old.map((w) => (w.id === updated.id ? updated : w)),
+      );
+    },
+  });
+}
+
 export function useStopWorktreeScript(issueId: string) {
   const qc = useQueryClient();
   return useMutation({

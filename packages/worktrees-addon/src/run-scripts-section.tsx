@@ -1,9 +1,26 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { AlertCircle, ChevronRight, Loader2, Play, Square, Terminal } from "lucide-react";
+import {
+  AlertCircle,
+  CheckCircle2,
+  ChevronRight,
+  Loader2,
+  Minus,
+  Play,
+  RotateCcw,
+  Square,
+  Terminal,
+  XCircle,
+} from "lucide-react";
 import { Button } from "@multica/ui/components/ui/button";
-import { useIssueWorktrees, useRunWorktreeScript, useStopWorktreeScript, useWorktreeRunLog } from "./queries";
+import {
+  useIssueWorktrees,
+  useRunWorktreeScript,
+  useRunWorktreeSetup,
+  useStopWorktreeScript,
+  useWorktreeRunLog,
+} from "./queries";
 import { useWorktreeRealtime } from "./use-worktree-realtime";
 import type { IssueWorktree } from "./types";
 
@@ -18,37 +35,61 @@ function repoLabel(url: string): string {
   return u || url;
 }
 
-function StatusPill({ worktree }: { worktree: IssueWorktree }) {
-  const { status, setup_status } = worktree;
+function StatusPill({ status }: { status: string }) {
   let tone = "text-muted-foreground";
-  let label: string = status;
-  switch (status) {
-    case "ready":
-      tone = setup_status === "failed" ? "text-warning" : "text-success";
-      label = setup_status === "failed" ? "ready (setup failed)" : "ready";
-      break;
-    case "error":
-      tone = "text-destructive";
-      break;
-    case "pending":
-    case "initializing":
-      tone = "text-warning";
-      break;
-    case "cleaning":
-      tone = "text-muted-foreground";
-      break;
-  }
-  return <span className={`shrink-0 text-[11px] ${tone}`}>{label}</span>;
+  if (status === "ready") tone = "text-success";
+  else if (status === "error") tone = "text-destructive";
+  else if (status === "pending" || status === "initializing") tone = "text-warning";
+  return <span className={`shrink-0 text-[11px] ${tone}`}>{status}</span>;
 }
 
-// Single repo worktree row: status, Run/Stop, and an expandable live log.
+// A small status glyph + label shared by the Setup and Run script lines.
+function ScriptStatus({ status, busy }: { status: string; busy: boolean }) {
+  if (busy || status === "running") {
+    return (
+      <span className="inline-flex items-center gap-1 text-[11px] text-info">
+        <Loader2 className="h-3 w-3 animate-spin" /> running
+      </span>
+    );
+  }
+  switch (status) {
+    case "succeeded":
+      return (
+        <span className="inline-flex items-center gap-1 text-[11px] text-success">
+          <CheckCircle2 className="h-3 w-3" /> ok
+        </span>
+      );
+    case "failed":
+      return (
+        <span className="inline-flex items-center gap-1 text-[11px] text-destructive">
+          <XCircle className="h-3 w-3" /> failed
+        </span>
+      );
+    case "stopped":
+      return <span className="text-[11px] text-muted-foreground">stopped</span>;
+    default:
+      return (
+        <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground/70">
+          <Minus className="h-3 w-3" /> not run
+        </span>
+      );
+  }
+}
+
+// One repo worktree: overall status, then Setup + Run as peer script lines
+// (each with its own status + control), and a shared streaming log.
 function WorktreeRow({ worktree, issueId }: { worktree: IssueWorktree; issueId: string }) {
+  const setup = useRunWorktreeSetup(issueId);
   const run = useRunWorktreeScript(issueId);
   const stop = useStopWorktreeScript(issueId);
   const [logOpen, setLogOpen] = useState(false);
 
   const isRunning = worktree.run_status === "running";
-  const canRun = worktree.status === "ready" && worktree.has_run_script && !isRunning;
+  const isSettingUp = worktree.setup_status === "running";
+  const busy = isRunning || isSettingUp;
+  const ready = worktree.status === "ready" || worktree.status === "error";
+  const canSetup = ready && worktree.has_setup_script && !busy;
+  const canRun = worktree.status === "ready" && worktree.has_run_script && !busy;
   const hasLog = !!worktree.run_task_id;
 
   return (
@@ -57,32 +98,55 @@ function WorktreeRow({ worktree, issueId }: { worktree: IssueWorktree; issueId: 
         <span className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground" title={worktree.repo_url}>
           {repoLabel(worktree.repo_url)}
         </span>
-        <StatusPill worktree={worktree} />
-        {isRunning ? (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-6 px-2 text-destructive hover:text-destructive"
-            disabled={stop.isPending}
-            onClick={() => stop.mutate(worktree.id)}
-          >
-            {stop.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Square className="h-3 w-3" />}
-            Stop
-          </Button>
-        ) : (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-6 px-2"
-            disabled={!canRun || run.isPending}
-            title={worktree.has_run_script ? undefined : "No run script configured"}
-            onClick={() => run.mutate(worktree.id)}
-          >
-            {run.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
-            Run
-          </Button>
-        )}
+        <StatusPill status={worktree.status} />
       </div>
+
+      {worktree.has_setup_script && (
+        <div className="mt-1 flex items-center gap-2 pl-1">
+          <span className="w-10 shrink-0 text-[11px] font-medium text-muted-foreground">Setup</span>
+          <ScriptStatus status={worktree.setup_status} busy={isSettingUp || setup.isPending} />
+          <Button
+            variant="ghost"
+            size="sm"
+            className="ml-auto h-6 px-2"
+            disabled={!canSetup || setup.isPending}
+            onClick={() => setup.mutate(worktree.id)}
+          >
+            {isSettingUp || setup.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <RotateCcw className="h-3 w-3" />}
+            Re-run
+          </Button>
+        </div>
+      )}
+
+      {worktree.has_run_script && (
+        <div className="mt-1 flex items-center gap-2 pl-1">
+          <span className="w-10 shrink-0 text-[11px] font-medium text-muted-foreground">Run</span>
+          <ScriptStatus status={worktree.run_status} busy={isRunning} />
+          {isRunning ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="ml-auto h-6 px-2 text-destructive hover:text-destructive"
+              disabled={stop.isPending}
+              onClick={() => stop.mutate(worktree.id)}
+            >
+              {stop.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Square className="h-3 w-3" />}
+              Stop
+            </Button>
+          ) : (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="ml-auto h-6 px-2"
+              disabled={!canRun || run.isPending}
+              onClick={() => run.mutate(worktree.id)}
+            >
+              {run.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
+              Run
+            </Button>
+          )}
+        </div>
+      )}
 
       {worktree.last_error && worktree.status === "error" && (
         <div className="mt-1 flex items-start gap-1 pl-1 text-[11px] text-destructive">
@@ -100,7 +164,7 @@ function WorktreeRow({ worktree, issueId }: { worktree: IssueWorktree; issueId: 
           >
             <ChevronRight className={`!size-3 stroke-[2.5] transition-transform ${logOpen ? "rotate-90" : ""}`} />
             <Terminal className="h-3 w-3" />
-            {isRunning ? "Live output" : "Last run output"}
+            {busy ? "Live output" : "Last output"}
           </button>
           {logOpen && <RunLog runTaskId={worktree.run_task_id!} />}
         </>
@@ -135,9 +199,8 @@ function RunLog({ runTaskId }: { runTaskId: string }) {
   );
 }
 
-// Sidebar section that lists this issue's repository worktrees with their
-// Setup status and on-demand Run/Stop controls + streaming logs. Hidden when
-// the issue has no worktrees (auto-init off, or none created yet).
+// Sidebar section: lists this issue's repository worktrees with Setup + Run
+// status and controls + streaming logs. Hidden when the issue has no worktrees.
 export function RunScriptsSection({ issueId }: RunScriptsSectionProps) {
   const { data: worktrees = [] } = useIssueWorktrees(issueId);
   useWorktreeRealtime(issueId);
@@ -145,7 +208,9 @@ export function RunScriptsSection({ issueId }: RunScriptsSectionProps) {
 
   if (worktrees.length === 0) return null;
 
-  const runningCount = worktrees.filter((w) => w.run_status === "running").length;
+  const activeCount = worktrees.filter(
+    (w) => w.run_status === "running" || w.setup_status === "running",
+  ).length;
 
   return (
     <div>
@@ -160,10 +225,10 @@ export function RunScriptsSection({ issueId }: RunScriptsSectionProps) {
         <ChevronRight
           className={`!size-3 shrink-0 stroke-[2.5] text-muted-foreground transition-transform ${open ? "rotate-90" : ""}`}
         />
-        {runningCount > 0 && (
+        {activeCount > 0 && (
           <span className="ml-auto inline-flex items-center gap-1 text-info">
             <span className="h-1.5 w-1.5 rounded-full bg-info animate-pulse" />
-            <span className="font-mono tabular-nums">{runningCount}</span>
+            <span className="font-mono tabular-nums">{activeCount}</span>
           </span>
         )}
       </button>

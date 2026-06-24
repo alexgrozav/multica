@@ -15,6 +15,7 @@ export interface IssueWorktree {
   run_status: string; // idle | running | succeeded | failed | stopped
   run_task_id?: string;
   has_run_script: boolean;
+  has_setup_script: boolean;
   last_error?: string;
   created_at: string;
   updated_at: string;

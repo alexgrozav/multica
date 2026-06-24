@@ -17,6 +17,7 @@ var (
 	ErrNotFound       = errors.New("worktree not found")
 	ErrNotReady       = errors.New("worktree not ready")
 	ErrNoRunScript    = errors.New("no run script configured")
+	ErrNoSetupScript  = errors.New("no setup script configured")
 	ErrDaemonOffline  = errors.New("owning machine offline")
 	ErrAlreadyRunning = errors.New("run already in progress")
 )
@@ -31,7 +32,8 @@ SELECT iw.id::text, iw.issue_id::text, iw.workspace_id::text, iw.repo_url,
        iw.owner_daemon_id, iw.path, iw.branch, iw.status, iw.setup_status,
        iw.run_status, iw.run_task_id::text, iw.last_error,
        iw.created_at, iw.updated_at,
-       (COALESCE(s.run, '') <> '') AS has_run_script
+       (COALESCE(s.run, '') <> '') AS has_run_script,
+       (COALESCE(s.setup, '') <> '') AS has_setup_script
 FROM issue_worktree iw
 LEFT JOIN worktree_repo_script s
   ON s.workspace_id = iw.workspace_id AND s.repo_url = iw.repo_url
@@ -44,7 +46,7 @@ func scanWorktree(row pgx.Row) (shared.Worktree, error) {
 	if err := row.Scan(
 		&w.ID, &w.IssueID, &w.WorkspaceID, &w.RepoURL, &w.OwnerDaemonID,
 		&w.Path, &w.Branch, &w.Status, &w.SetupStatus, &w.RunStatus,
-		&runTaskID, &w.LastError, &createdAt, &updatedAt, &w.HasRunScript,
+		&runTaskID, &w.LastError, &createdAt, &updatedAt, &w.HasRunScript, &w.HasSetupScript,
 	); err != nil {
 		return shared.Worktree{}, err
 	}
@@ -242,7 +244,47 @@ func (s *Store) RequestRun(ctx context.Context, id string) (shared.Worktree, err
 	if !w.HasRunScript {
 		return shared.Worktree{}, ErrNoRunScript
 	}
-	if w.RunStatus == shared.RunRunning {
+	if w.RunStatus == shared.RunRunning || w.SetupStatus == shared.ScriptRunning {
+		return shared.Worktree{}, ErrAlreadyRunning
+	}
+	online, err := s.DaemonOnline(ctx, w.WorkspaceID, w.OwnerDaemonID)
+	if err != nil {
+		return shared.Worktree{}, err
+	}
+	if !online {
+		return shared.Worktree{}, ErrDaemonOffline
+	}
+	// A data-modifying CTE's writes are NOT visible to a sibling SELECT of the
+	// same table in one statement, so update-then-Get in two statements.
+	runTaskID := uuid.NewString()
+	var updatedID string
+	err = s.db.QueryRow(ctx,
+		`UPDATE issue_worktree SET run_status='running', pending_action='run',
+		        run_task_id=$2, last_error='', updated_at=now()
+		 WHERE id=$1 AND run_status<>'running' RETURNING id::text`, id, runTaskID).Scan(&updatedID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return shared.Worktree{}, ErrAlreadyRunning
+	}
+	if err != nil {
+		return shared.Worktree{}, err
+	}
+	return s.Get(ctx, updatedID)
+}
+
+// RequestSetup re-runs the Setup script in an existing worktree (ready or
+// error), streaming its output to a fresh run channel. Gated like RequestRun.
+func (s *Store) RequestSetup(ctx context.Context, id string) (shared.Worktree, error) {
+	w, err := s.Get(ctx, id)
+	if err != nil {
+		return shared.Worktree{}, err
+	}
+	if w.Status != shared.StatusReady && w.Status != shared.StatusError {
+		return shared.Worktree{}, ErrNotReady
+	}
+	if !w.HasSetupScript {
+		return shared.Worktree{}, ErrNoSetupScript
+	}
+	if w.RunStatus == shared.RunRunning || w.SetupStatus == shared.ScriptRunning {
 		return shared.Worktree{}, ErrAlreadyRunning
 	}
 	online, err := s.DaemonOnline(ctx, w.WorkspaceID, w.OwnerDaemonID)
@@ -253,17 +295,18 @@ func (s *Store) RequestRun(ctx context.Context, id string) (shared.Worktree, err
 		return shared.Worktree{}, ErrDaemonOffline
 	}
 	runTaskID := uuid.NewString()
-	out, err := scanWorktree(s.db.QueryRow(ctx,
-		`WITH upd AS (
-		   UPDATE issue_worktree SET run_status='running', pending_action='run',
-		          run_task_id=$2, last_error='', updated_at=now()
-		   WHERE id=$1 AND run_status<>'running' RETURNING id
-		 )
-		 `+worktreeSelect+` WHERE iw.id IN (SELECT id FROM upd)`, id, runTaskID))
+	var updatedID string
+	err = s.db.QueryRow(ctx,
+		`UPDATE issue_worktree SET setup_status='running', pending_action='setup',
+		        run_task_id=$2, last_error='', updated_at=now()
+		 WHERE id=$1 AND setup_status<>'running' AND run_status<>'running' RETURNING id::text`, id, runTaskID).Scan(&updatedID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return shared.Worktree{}, ErrAlreadyRunning
 	}
-	return out, err
+	if err != nil {
+		return shared.Worktree{}, err
+	}
+	return s.Get(ctx, updatedID)
 }
 
 // RequestStop queues a stop for a running worktree (idempotent).
@@ -392,13 +435,14 @@ func (s *Store) ClaimActionJobs(ctx context.Context, daemonID string) ([]shared.
 			return nil, err
 		}
 		switch r.act {
+		case shared.ActionSetup:
+			job.Kind, job.Setup = shared.JobSetup, setup
 		case shared.ActionRun:
 			job.Kind, job.Run = shared.JobRun, run
 		case shared.ActionStop:
 			job.Kind = shared.JobStop
 		case shared.ActionCleanup:
 			job.Kind, job.Cleanup = shared.JobCleanup, cleanup
-			_ = setup
 		default:
 			continue
 		}
@@ -419,6 +463,13 @@ func (s *Store) ReportStatus(ctx context.Context, daemonID, worktreeID string, r
 			`UPDATE issue_worktree SET status=$2, path=$3, branch=$4, setup_status=$5, last_error=$6, updated_at=now()
 			 WHERE id=$1 AND owner_daemon_id=$7`,
 			worktreeID, status, rep.Path, rep.Branch, nz(rep.SetupStatus, shared.ScriptNone), rep.Error, daemonID); err != nil {
+			return shared.Worktree{}, err
+		}
+	case shared.JobSetup:
+		if _, err := s.db.Exec(ctx,
+			`UPDATE issue_worktree SET setup_status=$2, last_error=$3, updated_at=now()
+			 WHERE id=$1 AND owner_daemon_id=$4`,
+			worktreeID, nz(rep.SetupStatus, shared.ScriptSucceeded), rep.Error, daemonID); err != nil {
 			return shared.Worktree{}, err
 		}
 	case shared.JobRun, shared.JobStop:

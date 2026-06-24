@@ -17,6 +17,7 @@ const IssueWorktreeSchema = z.object({
   run_status: z.string().default("idle"),
   run_task_id: z.string().optional(),
   has_run_script: z.boolean().default(false),
+  has_setup_script: z.boolean().default(false),
   last_error: z.string().optional(),
   created_at: z.string().default(""),
   updated_at: z.string().default(""),
@@ -46,9 +47,17 @@ function placeholderWorktree(id: string): IssueWorktree {
     setup_status: "none",
     run_status: "idle",
     has_run_script: false,
+    has_setup_script: false,
     created_at: "",
     updated_at: "",
   };
+}
+
+export async function runWorktreeSetup(issueId: string, worktreeId: string): Promise<IssueWorktree> {
+  const raw = await api.fetch<unknown>(`/api/worktree/issues/${issueId}/${worktreeId}/setup`, { method: "POST" });
+  return parseWithFallback(raw, IssueWorktreeSchema, placeholderWorktree(worktreeId), {
+    endpoint: "POST /api/worktree/issues/{id}/{worktreeId}/setup",
+  });
 }
 
 export async function listIssueWorktrees(issueId: string): Promise<IssueWorktree[]> {

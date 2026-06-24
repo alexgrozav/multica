@@ -49,6 +49,15 @@ func TestMain(m *testing.M) {
 		pool.Close()
 		os.Exit(0)
 	}
+	// The host schema must be migrated (we read workspace.repos). The default
+	// `multica` DB may be empty; the migrated DB is the worktree's isolated one.
+	var hasWorkspace bool
+	_ = pool.QueryRow(ctx, `SELECT to_regclass('public.workspace') IS NOT NULL`).Scan(&hasWorkspace)
+	if !hasWorkspace {
+		fmt.Println("Skipping worktrees serverside tests: host schema not migrated in this DB (set DATABASE_URL to your migrated/worktree DB).")
+		pool.Close()
+		os.Exit(0)
+	}
 	if err := EnsureSchema(ctx, pool); err != nil {
 		fmt.Printf("EnsureSchema failed (is the host schema migrated?): %v\n", err)
 		pool.Close()
@@ -118,6 +127,7 @@ func (s *eventSink) count(eventType string) int {
 }
 
 func newTestModule(role, daemonID string, sink *eventSink) *Module {
+	_ = daemonID // daemon identity now travels as a query param, not via Deps
 	return New(Deps{
 		Pool:      testPool,
 		Publish:   sink.publish,
@@ -125,8 +135,7 @@ func newTestModule(role, daemonID string, sink *eventSink) *Module {
 		Principal: func(*http.Request) (Principal, bool) {
 			return Principal{WorkspaceID: testWorkspaceID, UserID: "test-user", Role: role}, true
 		},
-		DaemonWorkspaceID: func(*http.Request) string { return testWorkspaceID },
-		DaemonID:          func(*http.Request) string { return daemonID },
+		CanAccessWorkspace: func(*http.Request, string) bool { return true },
 	})
 }
 
@@ -346,6 +355,73 @@ func TestMarkCleanupForIssue(t *testing.T) {
 	gotPending, _ := s.Get(ctx(), pending.ID)
 	if gotPending.Status != shared.StatusRemoved {
 		t.Fatalf("pending row status = %q, want removed", gotPending.Status)
+	}
+}
+
+func TestRequestSetupRerun(t *testing.T) {
+	s := NewStore(testPool)
+	issueID := newIssueID()
+	_ = s.PutConfig(ctx(), testWorkspaceID, shared.Config{Repos: []shared.RepoScript{{RepoURL: repoA, Setup: "make setup"}}})
+	w, err := s.CreateWorktreeRow(ctx(), issueID, testWorkspaceID, repoA)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if !w.HasSetupScript {
+		t.Fatalf("row should report has_setup_script")
+	}
+
+	// pending → not ready
+	if _, err := s.RequestSetup(ctx(), w.ID); err != ErrNotReady {
+		t.Fatalf("RequestSetup(pending) = %v, want ErrNotReady", err)
+	}
+
+	// make ready, owned, online
+	if _, err := s.ClaimInitJobs(ctx(), "daemon-1", testWorkspaceID); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if _, err := s.ReportStatus(ctx(), "daemon-1", w.ID, shared.StatusReport{Kind: shared.JobInit, Status: shared.StatusReady, SetupStatus: shared.ScriptSucceeded}); err != nil {
+		t.Fatalf("report ready: %v", err)
+	}
+	if err := s.TouchDaemon(ctx(), testWorkspaceID, "daemon-1"); err != nil {
+		t.Fatalf("touch: %v", err)
+	}
+
+	out, err := s.RequestSetup(ctx(), w.ID)
+	if err != nil {
+		t.Fatalf("RequestSetup(ready) = %v, want success", err)
+	}
+	if out.SetupStatus != shared.ScriptRunning || out.RunTaskID == "" {
+		t.Fatalf("after RequestSetup = %+v, want setup running + run_task_id", out)
+	}
+
+	// daemon claims a setup job (with the setup script + run channel)
+	actions, err := s.ClaimActionJobs(ctx(), "daemon-1")
+	if err != nil {
+		t.Fatalf("ClaimActionJobs: %v", err)
+	}
+	var setupJob *shared.Job
+	for i := range actions {
+		if actions[i].WorktreeID == w.ID {
+			setupJob = &actions[i]
+		}
+	}
+	if setupJob == nil || setupJob.Kind != shared.JobSetup || setupJob.Setup != "make setup" || setupJob.RunTaskID != out.RunTaskID {
+		t.Fatalf("setup action job = %+v, want setup/script/run_task_id", setupJob)
+	}
+
+	// report setup result — only setup_status changes
+	if _, err := s.ReportStatus(ctx(), "daemon-1", w.ID, shared.StatusReport{Kind: shared.JobSetup, SetupStatus: shared.ScriptFailed, Error: "boom"}); err != nil {
+		t.Fatalf("report setup: %v", err)
+	}
+	got, _ := s.Get(ctx(), w.ID)
+	if got.SetupStatus != shared.ScriptFailed || got.Status != shared.StatusReady {
+		t.Fatalf("after setup report = status %q setup %q, want ready + failed", got.Status, got.SetupStatus)
+	}
+
+	// no setup script configured → ErrNoSetupScript
+	_ = s.PutConfig(ctx(), testWorkspaceID, shared.Config{Repos: []shared.RepoScript{{RepoURL: repoA}}})
+	if _, err := s.RequestSetup(ctx(), w.ID); err != ErrNoSetupScript {
+		t.Fatalf("RequestSetup(no script) = %v, want ErrNoSetupScript", err)
 	}
 }
 

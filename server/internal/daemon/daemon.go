@@ -3444,6 +3444,16 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		defer d.unmarkActiveEnvRoot(env.RootDir)
 	}
 
+	// worktrees add-on: eagerly check out this task's repos into the agent's
+	// workdir and run each repo's Setup script BEFORE the agent launches, so the
+	// agent starts in a prepared tree. A checkout/Setup failure returns here —
+	// before StartTask — so handleTask's FailTask + taskfailure.Classify path
+	// records it and the agent never runs (the prepare lease is released by the
+	// deferred stopPrepareLease above).
+	if err := d.eagerCheckoutTaskRepos(ctx, task, env, agentName); err != nil {
+		return TaskResult{}, err
+	}
+
 	// Issue #3999 race A: now that env.WorkDir is on disk, transition the
 	// server-side state machine dispatched (or waiting_local_directory) →
 	// running. Calling StartTask before Prepare/Reuse let any consumer

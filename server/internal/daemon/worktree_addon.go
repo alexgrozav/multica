@@ -2,9 +2,11 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	worktreesdaemon "github.com/multica-ai/multica/server/addons/worktrees/daemonside"
+	"github.com/multica-ai/multica/server/internal/daemon/execenv"
 	"github.com/multica-ai/multica/server/internal/daemon/repocache"
 )
 
@@ -83,4 +85,46 @@ func (d *Daemon) runCheckoutSetup(ctx context.Context, workspaceID, repoURL, wor
 		d.logger.Info("worktrees: setup script completed", "repo", repoURL, "worktree", worktreePath)
 	}
 	return buf.String(), nil
+}
+
+// eagerCheckoutTaskRepos checks out each of the task's repos into the agent's
+// workdir and runs the repo Setup script there, BEFORE the agent launches — so
+// the agent starts in a prepared tree rather than an empty one. It mirrors the
+// /repo/checkout handler (the agent's lazy-checkout path), looped over
+// task.Repos, and returns the first error so the caller fails the task before
+// StartTask (the agent never runs). No-op for local_directory tasks (the agent
+// works in the user's own tree) and when there is no repo cache.
+//
+// The agent's later lazy `multica repo checkout` reuses the same worktree
+// idempotently; if it does a destructive reuse, the existing checkout-Setup hook
+// re-runs Setup, so the tree is always consistent (no marker needed).
+func (d *Daemon) eagerCheckoutTaskRepos(ctx context.Context, task Task, env *execenv.Environment, agentName string) error {
+	if env == nil || env.LocalDirectory || d.repoCache == nil {
+		return nil
+	}
+	coAuthored := d.workspaceCoAuthoredByEnabled(task.WorkspaceID)
+	for _, repo := range task.Repos {
+		url := strings.TrimSpace(repo.URL)
+		if url == "" {
+			continue
+		}
+		if err := d.ensureRepoReady(ctx, task.WorkspaceID, url); err != nil {
+			return fmt.Errorf("eager checkout: repo not ready %s: %w", url, err)
+		}
+		result, err := d.repoCache.CreateWorktree(repocache.WorktreeParams{
+			WorkspaceID:         task.WorkspaceID,
+			RepoURL:             url,
+			WorkDir:             env.WorkDir,
+			AgentName:           agentName,
+			TaskID:              task.ID,
+			CoAuthoredByEnabled: coAuthored,
+		})
+		if err != nil {
+			return fmt.Errorf("eager checkout: create worktree %s: %w", url, err)
+		}
+		if out, serr := d.runCheckoutSetup(ctx, task.WorkspaceID, url, result.Path); serr != nil {
+			return fmt.Errorf("eager checkout: setup %s: %w\n%s", url, serr, out)
+		}
+	}
+	return nil
 }

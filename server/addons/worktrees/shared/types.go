@@ -79,6 +79,7 @@ type Worktree struct {
 	SetupStatus    string `json:"setup_status"`
 	RunStatus      string `json:"run_status"`
 	RunTaskID      string `json:"run_task_id,omitempty"`
+	SetupTaskID    string `json:"setup_task_id,omitempty"`
 	HasRunScript   bool   `json:"has_run_script"`
 	HasSetupScript bool   `json:"has_setup_script"`
 	LastError      string `json:"last_error,omitempty"`
@@ -95,6 +96,7 @@ type Job struct {
 	WorkspaceID string `json:"workspace_id"`
 	RepoURL     string `json:"repo_url"`
 	RunTaskID   string `json:"run_task_id,omitempty"`
+	SetupTaskID string `json:"setup_task_id,omitempty"`
 	Setup       string `json:"setup,omitempty"`
 	Run         string `json:"run,omitempty"`
 	Cleanup     string `json:"cleanup,omitempty"`

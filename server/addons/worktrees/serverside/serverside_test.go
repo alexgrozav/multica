@@ -239,6 +239,11 @@ func TestClaimInitJobsAtomicAndScoped(t *testing.T) {
 		if j.Kind != shared.JobInit || j.WorkspaceID != testWorkspaceID {
 			t.Fatalf("job = %+v, want init/workspace-scoped", j)
 		}
+		// Every claimed init allocates a setup channel up-front so the boot
+		// Setup's output can stream to the UI's default Setup tab.
+		if j.SetupTaskID == "" {
+			t.Fatalf("init job = %+v, want a setup_task_id allocated", j)
+		}
 		if j.RepoURL == repoA && j.Setup == "setup-a" {
 			sawSetup = true
 		}
@@ -390,11 +395,11 @@ func TestRequestSetupRerun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RequestSetup(ready) = %v, want success", err)
 	}
-	if out.SetupStatus != shared.ScriptRunning || out.RunTaskID == "" {
-		t.Fatalf("after RequestSetup = %+v, want setup running + run_task_id", out)
+	if out.SetupStatus != shared.ScriptRunning || out.SetupTaskID == "" {
+		t.Fatalf("after RequestSetup = %+v, want setup running + setup_task_id", out)
 	}
 
-	// daemon claims a setup job (with the setup script + run channel)
+	// daemon claims a setup job (with the setup script + setup channel)
 	actions, err := s.ClaimActionJobs(ctx(), "daemon-1")
 	if err != nil {
 		t.Fatalf("ClaimActionJobs: %v", err)
@@ -405,8 +410,8 @@ func TestRequestSetupRerun(t *testing.T) {
 			setupJob = &actions[i]
 		}
 	}
-	if setupJob == nil || setupJob.Kind != shared.JobSetup || setupJob.Setup != "make setup" || setupJob.RunTaskID != out.RunTaskID {
-		t.Fatalf("setup action job = %+v, want setup/script/run_task_id", setupJob)
+	if setupJob == nil || setupJob.Kind != shared.JobSetup || setupJob.Setup != "make setup" || setupJob.SetupTaskID != out.SetupTaskID {
+		t.Fatalf("setup action job = %+v, want setup/script/setup_task_id", setupJob)
 	}
 
 	// report setup result — only setup_status changes
@@ -562,5 +567,37 @@ func TestHTTPDaemonLogStreaming(t *testing.T) {
 	}
 	if got := sink.count(shared.EventWorktreeRunLog) - before; got != 2 {
 		t.Fatalf("published %d run-log events, want 2", got)
+	}
+}
+
+// Setup logs stream to setup_task_id, a different channel than run_task_id; the
+// log endpoint must resolve the worktree from either (GetByRunTaskID).
+func TestHTTPDaemonSetupLogStreaming(t *testing.T) {
+	sink := &eventSink{}
+	m := newTestModule("owner", "daemon-1", sink)
+	router := testRouter(m)
+	issueID := newIssueID()
+	_ = m.store.PutConfig(ctx(), testWorkspaceID, shared.Config{Repos: []shared.RepoScript{{RepoURL: repoA, Setup: "make"}}})
+	row, _ := m.store.CreateWorktreeRow(ctx(), issueID, testWorkspaceID, repoA)
+	_, _ = m.store.ClaimInitJobs(ctx(), "daemon-1", testWorkspaceID)
+	_, _ = m.store.ReportStatus(ctx(), "daemon-1", row.ID, shared.StatusReport{Kind: shared.JobInit, Status: shared.StatusReady, SetupStatus: shared.ScriptSucceeded})
+	_ = m.store.TouchDaemon(ctx(), testWorkspaceID, "daemon-1")
+	armed, err := m.store.RequestSetup(ctx(), row.ID)
+	if err != nil {
+		t.Fatalf("RequestSetup: %v", err)
+	}
+	if armed.SetupTaskID == "" || armed.SetupTaskID == armed.RunTaskID {
+		t.Fatalf("setup channel = %q (run %q), want a distinct non-empty id", armed.SetupTaskID, armed.RunTaskID)
+	}
+
+	before := sink.count(shared.EventWorktreeRunLog)
+	body := `{"lines":[{"seq":1,"stream":"stdout","content":"setup line"}]}`
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("POST", "/api/daemon/worktree/runs/"+armed.SetupTaskID+"/logs", strings.NewReader(body)))
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("POST setup logs = %d, want 204: %s", w.Code, w.Body.String())
+	}
+	if got := sink.count(shared.EventWorktreeRunLog) - before; got != 1 {
+		t.Fatalf("published %d setup-log events, want 1", got)
 	}
 }

@@ -46,10 +46,10 @@ func TestDaemonWorktreeLifecycleE2E(t *testing.T) {
 	wtPath := filepath.Join(root, ws, ".issue-worktrees", shortID(issue), repoName(origin))
 	wantBranch := "issue/" + shortID(issue) + "/" + repoName(origin)
 
-	// 1) INIT + SETUP
+	// 1) INIT + SETUP — boot Setup streams its output to the setup channel.
 	m.handleInit(context.Background(), shared.Job{
 		Kind: shared.JobInit, WorktreeID: wtID, IssueID: issue, WorkspaceID: ws,
-		RepoURL: origin, Setup: "echo SETUP_OK > marker.txt",
+		RepoURL: origin, SetupTaskID: "init-setup-1", Setup: "echo SETUP_OK > marker.txt",
 	})
 	if !isWorktree(wtPath) {
 		t.Fatalf("worktree not created at %s", wtPath)
@@ -63,12 +63,15 @@ func TestDaemonWorktreeLifecycleE2E(t *testing.T) {
 	if st := fake.lastStatus(t); st.Kind != shared.JobInit || st.Status != shared.StatusReady || st.SetupStatus != shared.ScriptSucceeded {
 		t.Fatalf("init status report = %+v, want ready + setup succeeded", st)
 	}
+	if !strings.Contains(fake.logText(), "[multica] setup finished") {
+		t.Fatalf("boot setup did not stream to the setup channel; got:\n%s", fake.logText())
+	}
 
-	// 1b) RE-RUN SETUP — appends to the marker; streams to the run channel and
+	// 1b) RE-RUN SETUP — appends to the marker; streams to the setup channel and
 	//     reports only setup_status (not worktree status).
 	m.handleSetup(context.Background(), shared.Job{
 		Kind: shared.JobSetup, WorktreeID: wtID, IssueID: issue, WorkspaceID: ws,
-		RepoURL: origin, RunTaskID: "setup-rerun-1", Setup: "echo RESETUP_OK >> marker.txt",
+		RepoURL: origin, SetupTaskID: "setup-rerun-1", Setup: "echo RESETUP_OK >> marker.txt",
 	})
 	if st := fake.lastStatus(t); st.Kind != shared.JobSetup || st.SetupStatus != shared.ScriptSucceeded {
 		t.Fatalf("re-run setup status report = %+v, want setup succeeded", st)

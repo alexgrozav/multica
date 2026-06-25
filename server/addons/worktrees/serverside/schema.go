@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS issue_worktree (
     setup_status   TEXT NOT NULL DEFAULT 'none',
     run_status     TEXT NOT NULL DEFAULT 'idle',
     run_task_id    UUID,
+    setup_task_id  UUID,
     pending_action TEXT NOT NULL DEFAULT '',
     last_error     TEXT NOT NULL DEFAULT '',
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -42,6 +43,12 @@ CREATE TABLE IF NOT EXISTS issue_worktree (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_issue_worktree ON issue_worktree(issue_id, repo_url);
 CREATE INDEX IF NOT EXISTS idx_issue_worktree_owner ON issue_worktree(owner_daemon_id) WHERE status <> 'removed';
 CREATE INDEX IF NOT EXISTS idx_issue_worktree_runtask ON issue_worktree(run_task_id);
+
+-- setup_task_id is the setup-log channel, distinct from run_task_id so the
+-- Setup and Run log streams don't clobber each other (added after initial
+-- release; ALTER is a no-op on fresh installs created by the CREATE above).
+ALTER TABLE issue_worktree ADD COLUMN IF NOT EXISTS setup_task_id UUID;
+CREATE INDEX IF NOT EXISTS idx_issue_worktree_setuptask ON issue_worktree(setup_task_id);
 
 -- Daemon liveness, used to gate on-demand Run when the owning machine is offline.
 CREATE TABLE IF NOT EXISTS worktree_daemon_seen (

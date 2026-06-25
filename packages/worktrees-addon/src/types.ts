@@ -14,6 +14,7 @@ export interface IssueWorktree {
   setup_status: string; // none | running | succeeded | failed
   run_status: string; // idle | running | succeeded | failed | stopped
   run_task_id?: string;
+  setup_task_id?: string; // log channel for the latest Setup execution (boot or re-run)
   has_run_script: boolean;
   has_setup_script: boolean;
   last_error?: string;

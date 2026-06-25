@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import {
   AlertCircle,
   CheckCircle2,
@@ -10,7 +10,6 @@ import {
   Play,
   RotateCcw,
   Square,
-  Terminal,
   XCircle,
 } from "lucide-react";
 import { Button } from "@multica/ui/components/ui/button";
@@ -19,9 +18,8 @@ import {
   useRunWorktreeScript,
   useRunWorktreeSetup,
   useStopWorktreeScript,
-  useWorktreeRunLog,
 } from "./queries";
-import { useWorktreeRealtime } from "./use-worktree-realtime";
+import { useWorktreeTabs } from "./worktree-tabs-context";
 import type { IssueWorktree } from "./types";
 
 interface RunScriptsSectionProps {
@@ -76,13 +74,15 @@ function ScriptStatus({ status, busy }: { status: string; busy: boolean }) {
   }
 }
 
-// One repo worktree: overall status, then Setup + Run as peer script lines
-// (each with its own status + control), and a shared streaming log.
+// One repo worktree: overall status, then Setup + Run as peer script lines (each
+// with its own status + control). Logs are no longer shown inline here — clicking
+// a script label opens its tab in the bottom log viewer; running a script opens
+// (and focuses) that tab too.
 function WorktreeRow({ worktree, issueId }: { worktree: IssueWorktree; issueId: string }) {
   const setup = useRunWorktreeSetup(issueId);
   const run = useRunWorktreeScript(issueId);
   const stop = useStopWorktreeScript(issueId);
-  const [logOpen, setLogOpen] = useState(false);
+  const { openSetup, openRun } = useWorktreeTabs();
 
   const isRunning = worktree.run_status === "running";
   const isSettingUp = worktree.setup_status === "running";
@@ -90,7 +90,6 @@ function WorktreeRow({ worktree, issueId }: { worktree: IssueWorktree; issueId: 
   const ready = worktree.status === "ready" || worktree.status === "error";
   const canSetup = ready && worktree.has_setup_script && !busy;
   const canRun = worktree.status === "ready" && worktree.has_run_script && !busy;
-  const hasLog = !!worktree.run_task_id;
 
   return (
     <div className="rounded px-1 py-1.5">
@@ -103,14 +102,24 @@ function WorktreeRow({ worktree, issueId }: { worktree: IssueWorktree; issueId: 
 
       {worktree.has_setup_script && (
         <div className="mt-1 flex items-center gap-2 pl-1">
-          <span className="w-10 shrink-0 text-[11px] font-medium text-muted-foreground">Setup</span>
+          <button
+            type="button"
+            aria-label="Open setup logs"
+            onClick={() => openSetup(worktree.id)}
+            className="w-10 shrink-0 text-left text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+          >
+            Setup
+          </button>
           <ScriptStatus status={worktree.setup_status} busy={isSettingUp || setup.isPending} />
           <Button
             variant="ghost"
             size="sm"
             className="ml-auto h-6 px-2"
             disabled={!canSetup || setup.isPending}
-            onClick={() => setup.mutate(worktree.id)}
+            onClick={() => {
+              setup.mutate(worktree.id);
+              openSetup(worktree.id);
+            }}
           >
             {isSettingUp || setup.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <RotateCcw className="h-3 w-3" />}
             Re-run
@@ -120,7 +129,14 @@ function WorktreeRow({ worktree, issueId }: { worktree: IssueWorktree; issueId: 
 
       {worktree.has_run_script && (
         <div className="mt-1 flex items-center gap-2 pl-1">
-          <span className="w-10 shrink-0 text-[11px] font-medium text-muted-foreground">Run</span>
+          <button
+            type="button"
+            aria-label="Open run logs"
+            onClick={() => openRun(worktree.id)}
+            className="w-10 shrink-0 text-left text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+          >
+            Run
+          </button>
           <ScriptStatus status={worktree.run_status} busy={isRunning} />
           {isRunning ? (
             <Button
@@ -139,7 +155,10 @@ function WorktreeRow({ worktree, issueId }: { worktree: IssueWorktree; issueId: 
               size="sm"
               className="ml-auto h-6 px-2"
               disabled={!canRun || run.isPending}
-              onClick={() => run.mutate(worktree.id)}
+              onClick={() => {
+                run.mutate(worktree.id);
+                openRun(worktree.id);
+              }}
             >
               {run.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
               Run
@@ -154,56 +173,17 @@ function WorktreeRow({ worktree, issueId }: { worktree: IssueWorktree; issueId: 
           <span className="min-w-0 break-words">{worktree.last_error}</span>
         </div>
       )}
-
-      {hasLog && (
-        <>
-          <button
-            type="button"
-            onClick={() => setLogOpen((v) => !v)}
-            className="mt-1 flex items-center gap-1 rounded px-1 py-0.5 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
-          >
-            <ChevronRight className={`!size-3 stroke-[2.5] transition-transform ${logOpen ? "rotate-90" : ""}`} />
-            <Terminal className="h-3 w-3" />
-            {busy ? "Live output" : "Last output"}
-          </button>
-          {logOpen && <RunLog runTaskId={worktree.run_task_id!} />}
-        </>
-      )}
     </div>
   );
 }
 
-function RunLog({ runTaskId }: { runTaskId: string }) {
-  const { data: lines = [] } = useWorktreeRunLog(runTaskId);
-  const ref = useRef<HTMLPreElement>(null);
-
-  useEffect(() => {
-    const el = ref.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [lines.length]);
-
-  if (lines.length === 0) {
-    return <div className="ml-4 mt-1 text-[11px] italic text-muted-foreground">No output yet.</div>;
-  }
-  return (
-    <pre
-      ref={ref}
-      className="ml-4 mt-1 max-h-48 overflow-auto rounded bg-muted/60 p-2 font-mono text-[11px] leading-snug text-muted-foreground"
-    >
-      {lines.map((l) => (
-        <div key={l.seq} className={l.stream === "stderr" ? "text-destructive/90" : undefined}>
-          {l.content}
-        </div>
-      ))}
-    </pre>
-  );
-}
-
 // Sidebar section: lists this issue's repository worktrees with Setup + Run
-// status and controls + streaming logs. Hidden when the issue has no worktrees.
+// status and controls. Streaming logs live in the bottom log-tab viewer
+// (WorktreeLogTabs), opened from the controls here. Hidden when the issue has no
+// worktrees. Realtime + tab state are owned by WorktreeTabsProvider (mounted by
+// WorktreeSidebarLayout), so this component is purely the list.
 export function RunScriptsSection({ issueId }: RunScriptsSectionProps) {
   const { data: worktrees = [] } = useIssueWorktrees(issueId);
-  useWorktreeRealtime(issueId);
   const [open, setOpen] = useState(true);
 
   if (worktrees.length === 0) return null;

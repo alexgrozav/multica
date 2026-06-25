@@ -1,4 +1,5 @@
 export { RunScriptsSection } from "./run-scripts-section";
+export { WorktreeSidebarLayout } from "./worktree-sidebar-layout";
 export { WorktreeScriptsTab } from "./worktree-scripts-tab";
 export { useWorktreeRealtime } from "./use-worktree-realtime";
 export {

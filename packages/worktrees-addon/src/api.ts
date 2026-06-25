@@ -16,6 +16,7 @@ const IssueWorktreeSchema = z.object({
   setup_status: z.string().default("none"),
   run_status: z.string().default("idle"),
   run_task_id: z.string().optional(),
+  setup_task_id: z.string().optional(),
   has_run_script: z.boolean().default(false),
   has_setup_script: z.boolean().default(false),
   last_error: z.string().optional(),

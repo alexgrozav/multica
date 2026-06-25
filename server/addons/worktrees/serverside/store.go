@@ -30,7 +30,7 @@ func NewStore(db DB) *Store { return &Store{db: db} }
 const worktreeSelect = `
 SELECT iw.id::text, iw.issue_id::text, iw.workspace_id::text, iw.repo_url,
        iw.owner_daemon_id, iw.path, iw.branch, iw.status, iw.setup_status,
-       iw.run_status, iw.run_task_id::text, iw.last_error,
+       iw.run_status, iw.run_task_id::text, iw.setup_task_id::text, iw.last_error,
        iw.created_at, iw.updated_at,
        (COALESCE(s.run, '') <> '') AS has_run_script,
        (COALESCE(s.setup, '') <> '') AS has_setup_script
@@ -41,17 +41,20 @@ LEFT JOIN worktree_repo_script s
 
 func scanWorktree(row pgx.Row) (shared.Worktree, error) {
 	var w shared.Worktree
-	var runTaskID *string
+	var runTaskID, setupTaskID *string
 	var createdAt, updatedAt time.Time
 	if err := row.Scan(
 		&w.ID, &w.IssueID, &w.WorkspaceID, &w.RepoURL, &w.OwnerDaemonID,
 		&w.Path, &w.Branch, &w.Status, &w.SetupStatus, &w.RunStatus,
-		&runTaskID, &w.LastError, &createdAt, &updatedAt, &w.HasRunScript, &w.HasSetupScript,
+		&runTaskID, &setupTaskID, &w.LastError, &createdAt, &updatedAt, &w.HasRunScript, &w.HasSetupScript,
 	); err != nil {
 		return shared.Worktree{}, err
 	}
 	if runTaskID != nil {
 		w.RunTaskID = *runTaskID
+	}
+	if setupTaskID != nil {
+		w.SetupTaskID = *setupTaskID
 	}
 	w.CreatedAt = createdAt.UTC().Format(time.RFC3339)
 	w.UpdatedAt = updatedAt.UTC().Format(time.RFC3339)
@@ -211,9 +214,11 @@ func (s *Store) Get(ctx context.Context, id string) (shared.Worktree, error) {
 	return w, err
 }
 
-// GetByRunTaskID resolves a worktree from its active run channel id.
+// GetByRunTaskID resolves a worktree from a log-channel id, matching either the
+// run channel (run_task_id) or the setup channel (setup_task_id) so streamed
+// Setup and Run output both route back to the owning worktree.
 func (s *Store) GetByRunTaskID(ctx context.Context, runTaskID string) (shared.Worktree, error) {
-	w, err := scanWorktree(s.db.QueryRow(ctx, worktreeSelect+` WHERE iw.run_task_id=$1`, runTaskID))
+	w, err := scanWorktree(s.db.QueryRow(ctx, worktreeSelect+` WHERE iw.run_task_id=$1 OR iw.setup_task_id=$1`, runTaskID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return shared.Worktree{}, ErrNotFound
 	}
@@ -303,12 +308,15 @@ func (s *Store) RequestSetup(ctx context.Context, id string) (shared.Worktree, e
 	if !online {
 		return shared.Worktree{}, ErrDaemonOffline
 	}
-	runTaskID := uuid.NewString()
+	// Setup streams to its own channel (setup_task_id), distinct from the run
+	// channel, so re-running Setup never clobbers the last Run's logs (and vice
+	// versa). A fresh id per execution keeps each run's log stream clean.
+	setupTaskID := uuid.NewString()
 	var updatedID string
 	err = s.db.QueryRow(ctx,
 		`UPDATE issue_worktree SET setup_status='running', pending_action='setup',
-		        run_task_id=$2, last_error='', updated_at=now()
-		 WHERE id=$1 AND setup_status<>'running' AND run_status<>'running' RETURNING id::text`, id, runTaskID).Scan(&updatedID)
+		        setup_task_id=$2, last_error='', updated_at=now()
+		 WHERE id=$1 AND setup_status<>'running' AND run_status<>'running' RETURNING id::text`, id, setupTaskID).Scan(&updatedID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return shared.Worktree{}, ErrAlreadyRunning
 	}
@@ -367,17 +375,18 @@ func (s *Store) ClaimInitJobs(ctx context.Context, daemonID, wsID string) ([]sha
 		   WHERE workspace_id=$2 AND status='pending' AND owner_daemon_id=''
 		   FOR UPDATE SKIP LOCKED
 		 )
-		 UPDATE issue_worktree iw SET owner_daemon_id=$1, status='initializing', updated_at=now()
+		 UPDATE issue_worktree iw SET owner_daemon_id=$1, status='initializing',
+		        setup_task_id=gen_random_uuid(), updated_at=now()
 		 FROM claimed WHERE iw.id=claimed.id
-		 RETURNING iw.id::text, iw.issue_id::text, iw.repo_url`, daemonID, wsID)
+		 RETURNING iw.id::text, iw.issue_id::text, iw.repo_url, iw.setup_task_id::text`, daemonID, wsID)
 	if err != nil {
 		return nil, err
 	}
-	type ref struct{ id, issueID, repoURL string }
+	type ref struct{ id, issueID, repoURL, setupTaskID string }
 	var refs []ref
 	for rows.Next() {
 		var r ref
-		if err := rows.Scan(&r.id, &r.issueID, &r.repoURL); err != nil {
+		if err := rows.Scan(&r.id, &r.issueID, &r.repoURL, &r.setupTaskID); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -394,7 +403,10 @@ func (s *Store) ClaimInitJobs(ctx context.Context, daemonID, wsID string) ([]sha
 		if err != nil {
 			return nil, err
 		}
-		jobs = append(jobs, shared.Job{Kind: shared.JobInit, WorktreeID: r.id, IssueID: r.issueID, WorkspaceID: wsID, RepoURL: r.repoURL, Setup: setup})
+		// SetupTaskID is allocated up-front (above) so the daemon can stream the
+		// boot Setup output to a channel the UI can read, even though no UI
+		// action triggered it.
+		jobs = append(jobs, shared.Job{Kind: shared.JobInit, WorktreeID: r.id, IssueID: r.issueID, WorkspaceID: wsID, RepoURL: r.repoURL, SetupTaskID: r.setupTaskID, Setup: setup})
 	}
 	return jobs, nil
 }
@@ -410,19 +422,19 @@ func (s *Store) ClaimActionJobs(ctx context.Context, daemonID string) ([]shared.
 		 )
 		 UPDATE issue_worktree iw SET pending_action='', updated_at=now()
 		 FROM claimed WHERE iw.id=claimed.id
-		 RETURNING iw.id::text, iw.issue_id::text, iw.workspace_id::text, iw.repo_url, iw.run_task_id::text, claimed.act`,
+		 RETURNING iw.id::text, iw.issue_id::text, iw.workspace_id::text, iw.repo_url, iw.run_task_id::text, iw.setup_task_id::text, claimed.act`,
 		daemonID)
 	if err != nil {
 		return nil, err
 	}
 	type ref struct {
 		id, issueID, wsID, repoURL, act string
-		runTaskID                       *string
+		runTaskID, setupTaskID          *string
 	}
 	var refs []ref
 	for rows.Next() {
 		var r ref
-		if err := rows.Scan(&r.id, &r.issueID, &r.wsID, &r.repoURL, &r.runTaskID, &r.act); err != nil {
+		if err := rows.Scan(&r.id, &r.issueID, &r.wsID, &r.repoURL, &r.runTaskID, &r.setupTaskID, &r.act); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -438,6 +450,9 @@ func (s *Store) ClaimActionJobs(ctx context.Context, daemonID string) ([]shared.
 		job := shared.Job{WorktreeID: r.id, IssueID: r.issueID, WorkspaceID: r.wsID, RepoURL: r.repoURL}
 		if r.runTaskID != nil {
 			job.RunTaskID = *r.runTaskID
+		}
+		if r.setupTaskID != nil {
+			job.SetupTaskID = *r.setupTaskID
 		}
 		setup, run, cleanup, err := s.scripts(ctx, r.wsID, r.repoURL)
 		if err != nil {

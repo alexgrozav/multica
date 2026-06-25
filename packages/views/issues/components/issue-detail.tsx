@@ -60,7 +60,7 @@ import { ResolvedThreadBar } from "./resolved-thread-bar";
 import { collectThreadReplies, deriveThreadResolution } from "./thread-utils";
 import { IssueAgentHeaderChip } from "./issue-agent-header-chip";
 import { ExecutionLogSection } from "./execution-log-section";
-import { RunScriptsSection } from "@multica/worktrees-addon";
+import { RunScriptsSection, WorktreeSidebarLayout } from "@multica/worktrees-addon";
 import { PullRequestList } from "./pull-request-list";
 import { useGitHubSettings } from "@multica/core/github";
 import { useQuery } from "@tanstack/react-query";
@@ -2227,7 +2227,9 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
         {detailContent}
         <Sheet open={mobileSidebarOpen} onOpenChange={setMobileSidebarOpen}>
           <SheetContent side="right" showCloseButton={false} className="w-[320px] overflow-y-auto p-4">
-            {sidebarContent}
+            <WorktreeSidebarLayout issueId={id} stacked>
+              {sidebarContent}
+            </WorktreeSidebarLayout>
           </SheetContent>
         </Sheet>
       </div>
@@ -2252,9 +2254,11 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
         panelRef={sidebarRef}
         onResize={handleDesktopSidebarResize}
       >
-        <AnimatedRightSidebar open={desktopSidebarVisualOpen} motionEnabled={desktopSidebarMotionEnabled}>
-          {sidebarContent}
-        </AnimatedRightSidebar>
+        <WorktreeSidebarLayout issueId={id}>
+          <AnimatedRightSidebar open={desktopSidebarVisualOpen} motionEnabled={desktopSidebarMotionEnabled}>
+            {sidebarContent}
+          </AnimatedRightSidebar>
+        </WorktreeSidebarLayout>
       </ResizablePanel>
     </ResizablePanelGroup>
   );

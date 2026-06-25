@@ -84,15 +84,19 @@ func (m *Module) handleInit(ctx context.Context, job shared.Job) {
 	errMsg := ""
 	if strings.TrimSpace(job.Setup) != "" {
 		setupStatus = shared.ScriptSucceeded
-		code, runErr := runScript(ctx, wtPath, job.Setup, m.scriptEnv(job, wtPath), func(stream, text string) {
-			m.log().Debug("worktree setup", "issue", job.IssueID, "repo", job.RepoURL, "stream", stream, "line", text)
-		})
+		// Stream the boot Setup to the setup channel so its logs land in the
+		// UI's default Setup tab, just like a re-run (handleSetup).
+		stream := newLogStreamer(ctx, m.cl, job.SetupTaskID)
+		stopFlush := stream.start()
+		code, runErr := runScript(ctx, wtPath, job.Setup, m.scriptEnv(job, wtPath), stream.add)
 		exitCode = &code
 		if runErr != nil {
 			setupStatus, errMsg = shared.ScriptFailed, "setup: "+runErr.Error()
 		} else if code != 0 {
 			setupStatus, errMsg = shared.ScriptFailed, fmt.Sprintf("setup exited with code %d", code)
 		}
+		stream.add(shared.StreamStderr, setupMarker(setupStatus, code))
+		stopFlush()
 	}
 
 	// The worktree exists regardless of setup outcome, so it stays "ready" and
@@ -147,11 +151,11 @@ func (m *Module) handleRun(ctx context.Context, job shared.Job) {
 }
 
 // handleSetup re-runs the Setup script in an existing worktree, streaming its
-// output to the run channel (so it shows in the same sidebar log viewer) and
+// output to the setup channel (its own Setup tab in the sidebar log viewer) and
 // reporting the setup_status outcome.
 func (m *Module) handleSetup(ctx context.Context, job shared.Job) {
 	wtPath := m.worktreePath(job)
-	stream := newLogStreamer(ctx, m.cl, job.RunTaskID)
+	stream := newLogStreamer(ctx, m.cl, job.SetupTaskID)
 	stopFlush := stream.start()
 
 	code, runErr := runScript(ctx, wtPath, job.Setup, m.scriptEnv(job, wtPath), stream.add)
@@ -163,11 +167,7 @@ func (m *Module) handleSetup(ctx context.Context, job shared.Job) {
 	case code != 0:
 		setupStatus, errMsg = shared.ScriptFailed, fmt.Sprintf("setup exited with code %d", code)
 	}
-	if setupStatus == shared.ScriptSucceeded {
-		stream.add(shared.StreamStderr, "[multica] setup finished")
-	} else {
-		stream.add(shared.StreamStderr, fmt.Sprintf("[multica] setup failed (exit %d)", code))
-	}
+	stream.add(shared.StreamStderr, setupMarker(setupStatus, code))
 	stopFlush()
 
 	_ = m.cl.reportStatus(ctx, job.WorktreeID, shared.StatusReport{
@@ -296,6 +296,13 @@ func finalMarker(runStatus string, code int) string {
 	default:
 		return "[multica] run finished"
 	}
+}
+
+func setupMarker(setupStatus string, code int) string {
+	if setupStatus == shared.ScriptSucceeded {
+		return "[multica] setup finished"
+	}
+	return fmt.Sprintf("[multica] setup failed (exit %d)", code)
 }
 
 // logStreamer batches run-output lines and flushes them to the server on a

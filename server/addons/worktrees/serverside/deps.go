@@ -44,10 +44,6 @@ type IssueEvent struct {
 	Status        string
 	PrevStatus    string
 	StatusChanged bool
-	// AssigneeType is the issue's assignee kind ("member" | "agent" | "squad" |
-	// ""). Used to skip the persistent auto-init worktree for agent/squad work
-	// (the agent task eagerly checks out + sets up its own workdir instead).
-	AssigneeType string
 }
 
 // Deps is the port through which the host supplies everything the server module

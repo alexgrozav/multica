@@ -455,23 +455,6 @@ func TestListenerAutoInit(t *testing.T) {
 	if sink.count(shared.EventWorktreeUpdated) < 2 {
 		t.Fatalf("expected >= 2 worktree:updated events, got %d", sink.count(shared.EventWorktreeUpdated))
 	}
-
-	// agent/squad-assigned issues skip the persistent worktree — the agent task
-	// eagerly checks out + runs Setup in its own workdir instead.
-	for _, at := range []string{"agent", "squad"} {
-		iss := newIssueID()
-		m.onIssueCreated(IssueEvent{Type: "issue:created", WorkspaceID: testWorkspaceID, IssueID: iss, AssigneeType: at})
-		if rows, _ := m.store.ListByIssue(ctx(), iss, testWorkspaceID); len(rows) != 0 {
-			t.Fatalf("assignee %q created %d rows, want 0 (skipped)", at, len(rows))
-		}
-	}
-
-	// member-assigned (and unassigned) issues still get persistent worktrees.
-	memIssue := newIssueID()
-	m.onIssueCreated(IssueEvent{Type: "issue:created", WorkspaceID: testWorkspaceID, IssueID: memIssue, AssigneeType: "member"})
-	if rows, _ := m.store.ListByIssue(ctx(), memIssue, testWorkspaceID); len(rows) != 2 {
-		t.Fatalf("member-assigned created %d rows, want 2", len(rows))
-	}
 }
 
 func TestListenerCleanupOnlyOnTransitionIntoDone(t *testing.T) {

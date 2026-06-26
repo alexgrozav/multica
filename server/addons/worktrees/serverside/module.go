@@ -49,13 +49,10 @@ func (m *Module) onIssueCreated(ev IssueEvent) {
 	if !auto {
 		return
 	}
-	// Skip the persistent worktree for agent/squad-assigned issues: the agent
-	// task eagerly checks out + runs Setup in its OWN workdir before it starts
-	// (see eagerCheckoutTaskRepos), so a separate parallel worktree here would be
-	// redundant duplicate work in a different location.
-	if ev.AssigneeType == "agent" || ev.AssigneeType == "squad" {
-		return
-	}
+	// NOTE: we intentionally create the persistent worktree for ALL issues,
+	// including agent/squad-assigned ones. It powers the issue sidebar's
+	// Run/Cleanup/Setup tabs and is independent of the agent's OWN workdir
+	// (which runTask prepares separately via eagerCheckoutTaskRepos).
 	urls, err := m.store.WorkspaceRepoURLs(ctx, ev.WorkspaceID)
 	if err != nil {
 		m.deps.log().Error("worktrees: read workspace repos failed", "error", err, "workspace_id", ev.WorkspaceID)

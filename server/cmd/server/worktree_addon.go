@@ -103,10 +103,9 @@ func translateIssueEvent(e events.Event) worktreesserver.IssueEvent {
 	// through JSON to read the fields we need without importing the host type.
 	if iss, ok := m["issue"]; ok {
 		var tmp struct {
-			ID           string  `json:"id"`
-			Status       string  `json:"status"`
-			WorkspaceID  string  `json:"workspace_id"`
-			AssigneeType *string `json:"assignee_type"` // nullable in the payload
+			ID          string `json:"id"`
+			Status      string `json:"status"`
+			WorkspaceID string `json:"workspace_id"`
 		}
 		if b, err := json.Marshal(iss); err == nil {
 			_ = json.Unmarshal(b, &tmp)
@@ -117,9 +116,6 @@ func translateIssueEvent(e events.Event) worktreesserver.IssueEvent {
 		}
 		if out.WorkspaceID == "" {
 			out.WorkspaceID = tmp.WorkspaceID
-		}
-		if tmp.AssigneeType != nil {
-			out.AssigneeType = *tmp.AssigneeType
 		}
 	}
 	if out.IssueID == "" {

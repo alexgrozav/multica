@@ -72,7 +72,7 @@ func (d *Daemon) runGC(ctx context.Context) {
 
 	stats := &gcStats{byPattern: map[string]int{}}
 	for _, wsEntry := range entries {
-		if !wsEntry.IsDir() || wsEntry.Name() == ".repos" {
+		if !wsEntry.IsDir() || wsEntry.Name() == ".repos" || wsEntry.Name() == ".issue-worktrees-cache" {
 			continue
 		}
 		wsDir := filepath.Join(root, wsEntry.Name())
@@ -109,6 +109,13 @@ func (d *Daemon) gcWorkspace(ctx context.Context, wsDir string, stats *gcStats) 
 			return
 		}
 		if !entry.IsDir() {
+			continue
+		}
+		// The worktrees add-on owns .issue-worktrees: per-issue worktrees that
+		// (in the unified model) are the agent's actual working tree with
+		// uncommitted work. Only the add-on's cleanup-on-done removes them — the
+		// per-task GC must never orphan-reclaim them.
+		if entry.Name() == ".issue-worktrees" {
 			continue
 		}
 		taskDir := filepath.Join(wsDir, entry.Name())

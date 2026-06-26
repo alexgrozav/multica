@@ -3431,6 +3431,11 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		}
 		if localAssignment != nil {
 			prepParams.LocalWorkDir = localAssignment.AbsPath
+		} else {
+			// worktrees add-on: make the agent work IN the per-issue worktree the
+			// sidebar controls (unified model), instead of a throwaway per-task
+			// workdir. "" keeps the default behavior.
+			prepParams.WorkDirOverride = d.issueWorktreeWorkDir(task)
 		}
 		env, err = execenv.Prepare(prepParams, d.logger)
 		if err != nil {
@@ -3450,7 +3455,11 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// before StartTask — so handleTask's FailTask + taskfailure.Classify path
 	// records it and the agent never runs (the prepare lease is released by the
 	// deferred stopPrepareLease above).
-	if err := d.eagerCheckoutTaskRepos(ctx, task, env, agentName); err != nil {
+	unifiedDir := ""
+	if pid := d.issueWorktreeWorkDir(task); pid != "" && env.WorkDir == pid {
+		unifiedDir = pid
+	}
+	if err := d.eagerCheckoutTaskRepos(ctx, task, env, agentName, unifiedDir); err != nil {
 		return TaskResult{}, err
 	}
 

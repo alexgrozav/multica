@@ -218,11 +218,11 @@ func (m *Module) reportInitError(ctx context.Context, job shared.Job, msg string
 // ---- path / env helpers ----
 
 func (m *Module) worktreePath(job shared.Job) string {
-	return filepath.Join(m.deps.WorkspacesRoot, job.WorkspaceID, ".issue-worktrees", shortID(job.IssueID), repoName(job.RepoURL))
+	return IssueWorktreePath(m.deps.WorkspacesRoot, job.WorkspaceID, job.IssueID, job.RepoURL)
 }
 
 func (m *Module) branchName(job shared.Job) string {
-	return "issue/" + shortID(job.IssueID) + "/" + repoName(job.RepoURL)
+	return IssueBranch(job.IssueID, job.RepoURL)
 }
 
 func (m *Module) scriptEnv(job shared.Job, wtPath string) []string {

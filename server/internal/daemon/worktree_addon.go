@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	worktreesdaemon "github.com/multica-ai/multica/server/addons/worktrees/daemonside"
@@ -98,7 +100,7 @@ func (d *Daemon) runCheckoutSetup(ctx context.Context, workspaceID, repoURL, wor
 // The agent's later lazy `multica repo checkout` reuses the same worktree
 // idempotently; if it does a destructive reuse, the existing checkout-Setup hook
 // re-runs Setup, so the tree is always consistent (no marker needed).
-func (d *Daemon) eagerCheckoutTaskRepos(ctx context.Context, task Task, env *execenv.Environment, agentName string) error {
+func (d *Daemon) eagerCheckoutTaskRepos(ctx context.Context, task Task, env *execenv.Environment, agentName, perIssueDir string) error {
 	if env == nil || env.LocalDirectory || d.repoCache == nil {
 		return nil
 	}
@@ -108,6 +110,38 @@ func (d *Daemon) eagerCheckoutTaskRepos(ctx context.Context, task Task, env *exe
 		if url == "" {
 			continue
 		}
+
+		// Unified model: the agent works IN the per-issue worktree the sidebar
+		// controls. Create it on the issue/* branch at the exact path the add-on
+		// uses (so handleInit, the agent, and Run/Cleanup all agree), idempotent
+		// and non-destructive; skip if already prepared (handleInit ran on issue
+		// creation, or a prior task) so Setup isn't re-run.
+		if perIssueDir != "" {
+			wtPath := filepath.Join(perIssueDir, worktreesdaemon.RepoDirName(url))
+			if worktreesdaemon.IsWorktree(wtPath) {
+				continue
+			}
+			if err := d.ensureRepoReady(ctx, task.WorkspaceID, url); err != nil {
+				return fmt.Errorf("eager checkout: repo not ready %s: %w", url, err)
+			}
+			bare := d.repoCache.Lookup(task.WorkspaceID, url)
+			if bare == "" {
+				return fmt.Errorf("eager checkout: repo not cached %s", url)
+			}
+			branch := worktreesdaemon.IssueBranch(task.IssueID, url)
+			if err := d.repoCache.WithRepoLock(bare, func() error {
+				_, e := worktreesdaemon.EnsureWorktreeAt(bare, wtPath, branch)
+				return e
+			}); err != nil {
+				return fmt.Errorf("eager checkout: create worktree %s: %w", url, err)
+			}
+			if out, serr := d.runCheckoutSetup(ctx, task.WorkspaceID, url, wtPath); serr != nil {
+				return fmt.Errorf("eager checkout: setup %s: %w\n%s", url, serr, out)
+			}
+			continue
+		}
+
+		// Legacy path (unified disabled): fresh per-task workdir, agent/* branch.
 		if err := d.ensureRepoReady(ctx, task.WorkspaceID, url); err != nil {
 			return fmt.Errorf("eager checkout: repo not ready %s: %w", url, err)
 		}
@@ -127,4 +161,23 @@ func (d *Daemon) eagerCheckoutTaskRepos(ctx context.Context, task Task, env *exe
 		}
 	}
 	return nil
+}
+
+// worktreeUnifyEnabled gates the unified per-issue agent workdir. Default ON;
+// set MULTICA_WORKTREE_UNIFIED=0 (or false/off) to fall back to the legacy
+// per-task workdir + agent/* branch.
+func (d *Daemon) worktreeUnifyEnabled() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("MULTICA_WORKTREE_UNIFIED")))
+	return v != "0" && v != "false" && v != "off"
+}
+
+// issueWorktreeWorkDir returns the per-issue worktree dir to use as BOTH the
+// agent's working directory and the sidebar's worktree location, or "" to keep
+// the default per-task workdir (unified disabled / no repos / no cache / no
+// issue). The caller also passes this as the eager-checkout perIssueDir.
+func (d *Daemon) issueWorktreeWorkDir(task Task) string {
+	if !d.worktreeUnifyEnabled() || d.repoCache == nil || len(task.Repos) == 0 || task.IssueID == "" {
+		return ""
+	}
+	return worktreesdaemon.IssueWorktreeParent(d.cfg.WorkspacesRoot, task.WorkspaceID, task.IssueID)
 }

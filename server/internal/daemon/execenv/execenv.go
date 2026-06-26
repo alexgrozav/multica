@@ -60,7 +60,16 @@ type PrepareParams struct {
 	// substituted. Used by the local_directory project_resource flow
 	// (MUL-2663). When set, the envRoot/workdir directory is not created.
 	LocalWorkDir string
-	Task         TaskContextForEnv // context data for writing files
+	// WorkDirOverride, when non-empty, makes the agent's env root AND working
+	// directory this exact path (a stable, reused-across-tasks per-issue dir)
+	// instead of the synthesised WorkspacesRoot/{ws}/{shortTask}/workdir. Unlike
+	// LocalWorkDir it does NOT flip LocalDirectory — eager checkout, GC reclaim,
+	// and the sidecar manifest all keep their normal behavior. The defensive
+	// "remove existing env" wipe is skipped (the dir is shared/reused, so wiping
+	// it would destroy a prior task's repos + uncommitted work). Used to unify
+	// the agent's worktree with the per-issue worktree the sidebar controls.
+	WorkDirOverride string
+	Task            TaskContextForEnv // context data for writing files
 }
 
 // TaskContextForEnv is the subset of task context used for writing context files.
@@ -195,24 +204,34 @@ func Prepare(params PrepareParams, logger *slog.Logger) (*Environment, error) {
 	}
 
 	envRoot := filepath.Join(params.WorkspacesRoot, params.WorkspaceID, shortID(params.TaskID))
+	if params.WorkDirOverride != "" {
+		envRoot = params.WorkDirOverride
+	}
 
-	// Remove existing env if present (defensive — task IDs are unique).
-	if _, err := os.Stat(envRoot); err == nil {
-		if err := os.RemoveAll(envRoot); err != nil {
-			return nil, fmt.Errorf("execenv: remove existing env: %w", err)
+	// Remove existing env if present (defensive — task IDs are unique). NOT for a
+	// WorkDirOverride: that dir is the shared per-issue worktree, reused across
+	// tasks; wiping it would destroy a prior task's repos + uncommitted work.
+	if params.WorkDirOverride == "" {
+		if _, err := os.Stat(envRoot); err == nil {
+			if err := os.RemoveAll(envRoot); err != nil {
+				return nil, fmt.Errorf("execenv: remove existing env: %w", err)
+			}
 		}
 	}
 
-	// Create directory tree. For the standard flow the agent's workdir is
-	// envRoot/workdir; for local_directory tasks the user's path takes its
-	// place and we only need to create the scratch directories under
-	// envRoot.
+	// Create directory tree. Standard flow: workdir = envRoot/workdir. A
+	// local_directory task substitutes the user's path. A WorkDirOverride makes
+	// the per-issue dir itself the workdir (envRoot is created as the parent of
+	// output/, so no separate workdir subdir).
 	workDir := filepath.Join(envRoot, "workdir")
 	scratchDirs := []string{filepath.Join(envRoot, "output"), filepath.Join(envRoot, "logs")}
-	if params.LocalWorkDir == "" {
-		scratchDirs = append(scratchDirs, workDir)
-	} else {
+	switch {
+	case params.LocalWorkDir != "":
 		workDir = params.LocalWorkDir
+	case params.WorkDirOverride != "":
+		workDir = envRoot
+	default:
+		scratchDirs = append(scratchDirs, workDir)
 	}
 	for _, dir := range scratchDirs {
 		if err := os.MkdirAll(dir, 0o755); err != nil {

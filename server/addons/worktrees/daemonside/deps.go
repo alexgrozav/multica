@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -42,6 +43,12 @@ type Deps struct {
 	// EnsureBare clones/fetches the repo into the daemon's cache and returns the
 	// bare path. Optional (nil → self-clone into the add-on's own cache dir).
 	EnsureBare func(workspaceID, repoURL string) (string, error)
+	// FetchBare runs `git fetch origin` on an already-cached bare clone so a new
+	// worktree branches off CURRENT origin/<default> instead of a remote-tracking
+	// ref left stale by an earlier LookupBare (which does not fetch). Self-locks on
+	// the bare repo. Optional (nil → the self-clone / EnsureBare paths already
+	// fetch, so only the LookupBare fast path needs this).
+	FetchBare func(barePath string) error
 	// WithRepoLock serializes git mutations on a bare repo. MUST be the daemon's
 	// own repo lock so our worktree adds don't race the daemon's agent-task
 	// worktree creation on the same bare clone (git's config.lock/packed-refs.lock
@@ -54,12 +61,14 @@ type Deps struct {
 
 // Module is the daemon-side worktrees add-on.
 type Module struct {
-	deps    Deps
-	cl      *client
-	httpC   *http.Client
-	mu      sync.Mutex
-	running map[string]context.CancelFunc // worktreeID -> cancel of the active Run
-	locks   sync.Map                      // bare/cache path -> *sync.Mutex (fallback when WithRepoLock is nil)
+	deps       Deps
+	cl         *client
+	httpC      *http.Client
+	mu         sync.Mutex
+	running    map[string]context.CancelFunc // runKey(worktreeID,name) -> cancel of the active Run
+	locks      sync.Map                      // bare/cache path -> *sync.Mutex (fallback when WithRepoLock is nil)
+	reconciled sync.Map                      // workspaceID -> true once stale runs are reset (one-shot per process)
+	scanBusy   atomic.Bool                   // one file-scan pass at a time; a slow pass skips ticks, never piles up
 }
 
 // New constructs the module from its dependencies.

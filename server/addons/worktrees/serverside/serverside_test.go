@@ -3,6 +3,7 @@ package serverside
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -49,8 +50,6 @@ func TestMain(m *testing.M) {
 		pool.Close()
 		os.Exit(0)
 	}
-	// The host schema must be migrated (we read workspace.repos). The default
-	// `multica` DB may be empty; the migrated DB is the worktree's isolated one.
 	var hasWorkspace bool
 	_ = pool.QueryRow(ctx, `SELECT to_regclass('public.workspace') IS NOT NULL`).Scan(&hasWorkspace)
 	if !hasWorkspace {
@@ -83,12 +82,14 @@ func TestMain(m *testing.M) {
 }
 
 func cleanup(ctx context.Context, pool *pgxpool.Pool) {
-	// Worktree tables key by workspace_id; resolve via slug to survive a prior
-	// crashed run where testWorkspaceID isn't set yet.
 	var wsID string
 	_ = pool.QueryRow(ctx, `SELECT id FROM workspace WHERE slug=$1`, testWorkspaceSlug).Scan(&wsID)
 	if wsID != "" {
-		for _, tbl := range []string{"issue_worktree", "worktree_repo_script", "worktree_settings", "worktree_daemon_seen"} {
+		_, _ = pool.Exec(ctx,
+			`DELETE FROM worktree_run WHERE worktree_id IN (SELECT id FROM issue_worktree WHERE workspace_id=$1)`, wsID)
+		_, _ = pool.Exec(ctx,
+			`DELETE FROM worktree_files WHERE worktree_id IN (SELECT id FROM issue_worktree WHERE workspace_id=$1)`, wsID)
+		for _, tbl := range []string{"issue_worktree", "worktree_daemon_seen"} {
 			_, _ = pool.Exec(ctx, fmt.Sprintf(`DELETE FROM %s WHERE workspace_id=$1`, tbl), wsID)
 		}
 	}
@@ -126,8 +127,7 @@ func (s *eventSink) count(eventType string) int {
 	return n
 }
 
-func newTestModule(role, daemonID string, sink *eventSink) *Module {
-	_ = daemonID // daemon identity now travels as a query param, not via Deps
+func newTestModule(role string, sink *eventSink) *Module {
 	return New(Deps{
 		Pool:      testPool,
 		Publish:   sink.publish,
@@ -150,56 +150,49 @@ func ctx() context.Context { return context.Background() }
 
 func newIssueID() string { return uuid.NewString() }
 
-// --- store tests ---
-
-func TestConfigRoundTrip(t *testing.T) {
-	s := NewStore(testPool)
-	cfg := shared.Config{AutoInit: true, Repos: []shared.RepoScript{
-		{RepoURL: repoA, Setup: "npm ci", Run: "npm run dev", Cleanup: "echo bye"},
-		{RepoURL: repoB, Setup: "make", Run: "", Cleanup: ""},
-	}}
-	if err := s.PutConfig(ctx(), testWorkspaceID, cfg); err != nil {
-		t.Fatalf("PutConfig: %v", err)
-	}
-	got, err := s.GetConfig(ctx(), testWorkspaceID)
+// makeReady drives a fresh worktree row to ready, owned by daemonID + online,
+// with the given discovered scripts, and returns it.
+func makeReady(t *testing.T, s *Store, issueID, identifier, repoURL, daemonID string, rep shared.StatusReport) shared.Worktree {
+	t.Helper()
+	w, err := s.CreateWorktreeRow(ctx(), issueID, identifier, testWorkspaceID, repoURL)
 	if err != nil {
-		t.Fatalf("GetConfig: %v", err)
+		t.Fatalf("create: %v", err)
 	}
-	if !got.AutoInit || len(got.Repos) != 2 {
-		t.Fatalf("config = %+v, want auto_init + 2 repos", got)
+	if _, err := s.ClaimInitJobs(ctx(), daemonID, testWorkspaceID); err != nil {
+		t.Fatalf("claim init: %v", err)
 	}
-	auto, err := s.AutoInit(ctx(), testWorkspaceID)
-	if err != nil || !auto {
-		t.Fatalf("AutoInit = %v, %v; want true", auto, err)
+	rep.Kind = shared.JobInit
+	if rep.Status == "" {
+		rep.Status = shared.StatusReady
 	}
-
-	// Dropping a repo from config removes its scripts.
-	if err := s.PutConfig(ctx(), testWorkspaceID, shared.Config{AutoInit: false, Repos: []shared.RepoScript{{RepoURL: repoA, Run: "x"}}}); err != nil {
-		t.Fatalf("PutConfig shrink: %v", err)
+	if _, err := s.ReportStatus(ctx(), daemonID, w.ID, rep); err != nil {
+		t.Fatalf("report ready: %v", err)
 	}
-	got, _ = s.GetConfig(ctx(), testWorkspaceID)
-	if got.AutoInit || len(got.Repos) != 1 || got.Repos[0].RepoURL != repoA {
-		t.Fatalf("after shrink config = %+v, want auto_init=false + only repoA", got)
+	if err := s.TouchDaemon(ctx(), testWorkspaceID, daemonID); err != nil {
+		t.Fatalf("touch: %v", err)
 	}
+	got, _ := s.Get(ctx(), w.ID)
+	return got
 }
+
+// --- store tests ---
 
 func TestCreateAndListWorktrees(t *testing.T) {
 	s := NewStore(testPool)
 	issueID := newIssueID()
-	// run script configured for repoA so has_run_script is true
-	if err := s.PutConfig(ctx(), testWorkspaceID, shared.Config{Repos: []shared.RepoScript{{RepoURL: repoA, Run: "npm run dev"}}}); err != nil {
-		t.Fatalf("PutConfig: %v", err)
-	}
 
-	w1, err := s.CreateWorktreeRow(ctx(), issueID, testWorkspaceID, repoA)
+	w1, err := s.CreateWorktreeRow(ctx(), issueID, "WAT-1", testWorkspaceID, repoA)
 	if err != nil {
 		t.Fatalf("CreateWorktreeRow: %v", err)
 	}
-	if w1.Status != shared.StatusPending || !w1.HasRunScript {
-		t.Fatalf("row = %+v, want pending + has_run_script", w1)
+	if w1.Status != shared.StatusPending || w1.Identifier != "WAT-1" {
+		t.Fatalf("row = %+v, want pending + identifier WAT-1", w1)
+	}
+	if w1.Runs == nil {
+		t.Fatalf("Runs should be non-nil (empty), got nil")
 	}
 	// idempotent on (issue, repo)
-	if _, err := s.CreateWorktreeRow(ctx(), issueID, testWorkspaceID, repoA); err != nil {
+	if _, err := s.CreateWorktreeRow(ctx(), issueID, "WAT-1", testWorkspaceID, repoA); err != nil {
 		t.Fatalf("CreateWorktreeRow idempotent: %v", err)
 	}
 	list, err := s.ListByIssue(ctx(), issueID, testWorkspaceID)
@@ -216,14 +209,13 @@ func TestCreateAndListWorktrees(t *testing.T) {
 	}
 }
 
-func TestClaimInitJobsAtomicAndScoped(t *testing.T) {
+func TestClaimInitJobsCarriesIdentifier(t *testing.T) {
 	s := NewStore(testPool)
 	issueID := newIssueID()
-	_ = s.PutConfig(ctx(), testWorkspaceID, shared.Config{Repos: []shared.RepoScript{{RepoURL: repoA, Setup: "setup-a"}}})
-	if _, err := s.CreateWorktreeRow(ctx(), issueID, testWorkspaceID, repoA); err != nil {
+	if _, err := s.CreateWorktreeRow(ctx(), issueID, "WAT-7", testWorkspaceID, repoA); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := s.CreateWorktreeRow(ctx(), issueID, testWorkspaceID, repoB); err != nil {
+	if _, err := s.CreateWorktreeRow(ctx(), issueID, "WAT-7", testWorkspaceID, repoB); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
@@ -234,29 +226,20 @@ func TestClaimInitJobsAtomicAndScoped(t *testing.T) {
 	if len(jobs) < 2 {
 		t.Fatalf("claimed %d init jobs, want >= 2", len(jobs))
 	}
-	var sawSetup bool
 	for _, j := range jobs {
 		if j.Kind != shared.JobInit || j.WorkspaceID != testWorkspaceID {
 			t.Fatalf("job = %+v, want init/workspace-scoped", j)
 		}
-		// Every claimed init allocates a setup channel up-front so the boot
-		// Setup's output can stream to the UI's default Setup tab.
+		if j.IssueID == issueID && j.Identifier != "WAT-7" {
+			t.Fatalf("init job = %+v, want identifier WAT-7 → branch name", j)
+		}
 		if j.SetupTaskID == "" {
 			t.Fatalf("init job = %+v, want a setup_task_id allocated", j)
 		}
-		if j.RepoURL == repoA && j.Setup == "setup-a" {
-			sawSetup = true
-		}
-	}
-	if !sawSetup {
-		t.Fatalf("init job for repoA missing its setup script")
 	}
 
 	// A second daemon claims nothing — they were atomically taken.
-	again, err := s.ClaimInitJobs(ctx(), "daemon-2", testWorkspaceID)
-	if err != nil {
-		t.Fatalf("ClaimInitJobs 2: %v", err)
-	}
+	again, _ := s.ClaimInitJobs(ctx(), "daemon-2", testWorkspaceID)
 	for _, j := range again {
 		if j.IssueID == issueID {
 			t.Fatalf("second daemon re-claimed an already-claimed init job: %+v", j)
@@ -264,91 +247,224 @@ func TestClaimInitJobsAtomicAndScoped(t *testing.T) {
 	}
 }
 
-func TestRequestRunGatingAndActionClaim(t *testing.T) {
+// RequestOpen arms a pending open on a ready worktree; ClaimOpenJobs hands it to
+// the owning daemon exactly once (carrying the target + resolvable issue) and the
+// derived WorkingDir is the per-issue parent.
+func TestRequestOpenAndClaim(t *testing.T) {
 	s := NewStore(testPool)
 	issueID := newIssueID()
-	_ = s.PutConfig(ctx(), testWorkspaceID, shared.Config{Repos: []shared.RepoScript{{RepoURL: repoA, Run: "npm run dev"}}})
-	w, err := s.CreateWorktreeRow(ctx(), issueID, testWorkspaceID, repoA)
-	if err != nil {
-		t.Fatalf("create: %v", err)
+	const daemonID = "daemon-open"
+	w := makeReady(t, s, issueID, "WAT-9", repoA, daemonID, shared.StatusReport{
+		Path: "/root/ws/worktrees/" + issueID[:8] + "/a",
+	})
+	if w.WorkingDir != "/root/ws/worktrees/"+issueID[:8] {
+		t.Fatalf("WorkingDir = %q, want the per-issue parent", w.WorkingDir)
 	}
 
-	// pending → not ready
-	if _, err := s.RequestRun(ctx(), w.ID); err != ErrNotReady {
+	if _, err := s.RequestOpen(ctx(), issueID, testWorkspaceID, shared.OpenZed); err != nil {
+		t.Fatalf("RequestOpen: %v", err)
+	}
+	jobs, err := s.ClaimOpenJobs(ctx(), daemonID)
+	if err != nil {
+		t.Fatalf("ClaimOpenJobs: %v", err)
+	}
+	var got *shared.Job
+	for i := range jobs {
+		if jobs[i].IssueID == issueID {
+			got = &jobs[i]
+		}
+	}
+	if got == nil {
+		t.Fatalf("claimed jobs %+v, want one JobOpen for issue %s", jobs, issueID)
+	}
+	if got.Kind != shared.JobOpen || got.OpenTarget != shared.OpenZed || got.WorkspaceID != testWorkspaceID {
+		t.Fatalf("open job = %+v, want kind=open target=zed workspace-scoped", *got)
+	}
+
+	// Cleared: a re-poll (this or another daemon) does not re-claim it.
+	again, _ := s.ClaimOpenJobs(ctx(), daemonID)
+	for _, j := range again {
+		if j.IssueID == issueID {
+			t.Fatalf("open job re-claimed after clear: %+v", j)
+		}
+	}
+}
+
+// RequestOpen refuses when the issue has no ready (checked-out) worktree yet.
+func TestRequestOpenNotReady(t *testing.T) {
+	s := NewStore(testPool)
+	issueID := newIssueID()
+	if _, err := s.CreateWorktreeRow(ctx(), issueID, "WAT-10", testWorkspaceID, repoA); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := s.RequestOpen(ctx(), issueID, testWorkspaceID, shared.OpenFinder); !errors.Is(err, ErrNotReady) {
+		t.Fatalf("RequestOpen on pending worktree err = %v, want ErrNotReady", err)
+	}
+}
+
+// The daemon discovers the scripts from multica.json and reports them on init;
+// the server materializes one worktree_run row per name and the has_* flags.
+func TestReportInitDiscoversRunScripts(t *testing.T) {
+	s := NewStore(testPool)
+	issueID := newIssueID()
+	w := makeReady(t, s, issueID, "WAT-2", repoA, "daemon-1", shared.StatusReport{
+		SetupStatus: shared.ScriptSucceeded, HasSetup: true, HasCleanup: true,
+		RunScripts: []string{"dev", "start"},
+	})
+	if !w.HasSetup || !w.HasCleanup {
+		t.Fatalf("worktree = %+v, want has_setup + has_cleanup", w)
+	}
+	if len(w.Runs) != 2 {
+		t.Fatalf("Runs = %+v, want 2 (dev, start)", w.Runs)
+	}
+	for _, r := range w.Runs {
+		if r.Status != shared.RunIdle {
+			t.Fatalf("run %q status = %q, want idle", r.Name, r.Status)
+		}
+	}
+
+	// Re-report with a narrowed set → the removed name is dropped, the kept one
+	// preserved.
+	if _, err := s.ReportStatus(ctx(), "daemon-1", w.ID, shared.StatusReport{
+		Kind: shared.JobInit, Status: shared.StatusReady, HasSetup: true, RunScripts: []string{"dev"},
+	}); err != nil {
+		t.Fatalf("re-report: %v", err)
+	}
+	got, _ := s.Get(ctx(), w.ID)
+	if len(got.Runs) != 1 || got.Runs[0].Name != "dev" {
+		t.Fatalf("after narrowing, Runs = %+v, want just dev", got.Runs)
+	}
+}
+
+func TestRequestRunPerNameGating(t *testing.T) {
+	s := NewStore(testPool)
+	issueID := newIssueID()
+
+	// pending row → not ready
+	pending, _ := s.CreateWorktreeRow(ctx(), issueID, "WAT-3", testWorkspaceID, repoB)
+	if _, err := s.RequestRun(ctx(), pending.ID, "dev"); err != ErrNotReady {
 		t.Fatalf("RequestRun(pending) = %v, want ErrNotReady", err)
 	}
 
-	// claim + report ready, owned by daemon-1
-	if _, err := s.ClaimInitJobs(ctx(), "daemon-1", testWorkspaceID); err != nil {
-		t.Fatalf("claim: %v", err)
-	}
-	if _, err := s.ReportStatus(ctx(), "daemon-1", w.ID, shared.StatusReport{Kind: shared.JobInit, Status: shared.StatusReady, Path: "/tmp/wt", Branch: "issue/x/a", SetupStatus: shared.ScriptSucceeded}); err != nil {
-		t.Fatalf("ReportStatus ready: %v", err)
+	w := makeReady(t, s, newIssueID(), "WAT-4", repoA, "daemon-1", shared.StatusReport{
+		SetupStatus: shared.ScriptSucceeded, RunScripts: []string{"dev"},
+	})
+
+	// unknown script name → ErrNoRunScript
+	if _, err := s.RequestRun(ctx(), w.ID, "nope"); err != ErrNoRunScript {
+		t.Fatalf("RequestRun(unknown) = %v, want ErrNoRunScript", err)
 	}
 
-	// ready but owning daemon hasn't been seen → offline
-	if _, err := s.RequestRun(ctx(), w.ID); err != ErrDaemonOffline {
-		t.Fatalf("RequestRun(offline) = %v, want ErrDaemonOffline", err)
-	}
-
-	// daemon checks in → run is armed
-	if err := s.TouchDaemon(ctx(), testWorkspaceID, "daemon-1"); err != nil {
-		t.Fatalf("TouchDaemon: %v", err)
-	}
-	out, err := s.RequestRun(ctx(), w.ID)
+	// known name, online → armed
+	out, err := s.RequestRun(ctx(), w.ID, "dev")
 	if err != nil {
-		t.Fatalf("RequestRun(ready,online) = %v, want success", err)
+		t.Fatalf("RequestRun(dev) = %v, want success", err)
 	}
-	if out.RunStatus != shared.RunRunning || out.RunTaskID == "" {
-		t.Fatalf("after RequestRun = %+v, want running + run_task_id", out)
-	}
-
-	// double-run rejected
-	if _, err := s.RequestRun(ctx(), w.ID); err != ErrAlreadyRunning {
-		t.Fatalf("RequestRun(running) = %v, want ErrAlreadyRunning", err)
-	}
-
-	// daemon claims the run action (pending_action cleared, run script included)
-	actions, err := s.ClaimActionJobs(ctx(), "daemon-1")
-	if err != nil {
-		t.Fatalf("ClaimActionJobs: %v", err)
-	}
-	var runJob *shared.Job
-	for i := range actions {
-		if actions[i].WorktreeID == w.ID {
-			runJob = &actions[i]
+	var dev *shared.RunScript
+	for i := range out.Runs {
+		if out.Runs[i].Name == "dev" {
+			dev = &out.Runs[i]
 		}
 	}
-	if runJob == nil || runJob.Kind != shared.JobRun || runJob.Run != "npm run dev" || runJob.RunTaskID != out.RunTaskID {
-		t.Fatalf("run action job = %+v, want run/script/run_task_id", runJob)
+	if dev == nil || dev.Status != shared.RunRunning || dev.RunTaskID == "" {
+		t.Fatalf("dev run = %+v, want running + run_task_id", dev)
 	}
 
-	// report run complete
-	if _, err := s.ReportStatus(ctx(), "daemon-1", w.ID, shared.StatusReport{Kind: shared.JobRun, RunStatus: shared.RunSucceeded}); err != nil {
-		t.Fatalf("ReportStatus run: %v", err)
+	// double-run of the same name rejected
+	if _, err := s.RequestRun(ctx(), w.ID, "dev"); err != ErrAlreadyRunning {
+		t.Fatalf("RequestRun(dev again) = %v, want ErrAlreadyRunning", err)
+	}
+
+	// daemon claims the run job with the name + run channel
+	runs, err := s.ClaimRunJobs(ctx(), "daemon-1")
+	if err != nil {
+		t.Fatalf("ClaimRunJobs: %v", err)
+	}
+	var runJob *shared.Job
+	for i := range runs {
+		if runs[i].WorktreeID == w.ID {
+			runJob = &runs[i]
+		}
+	}
+	if runJob == nil || runJob.Kind != shared.JobRun || runJob.ScriptName != "dev" || runJob.RunTaskID != dev.RunTaskID {
+		t.Fatalf("run job = %+v, want run/dev/run_task_id", runJob)
+	}
+
+	// report the named run complete
+	if _, err := s.ReportStatus(ctx(), "daemon-1", w.ID, shared.StatusReport{
+		Kind: shared.JobRun, ScriptName: "dev", RunStatus: shared.RunSucceeded,
+	}); err != nil {
+		t.Fatalf("report run: %v", err)
 	}
 	got, _ := s.Get(ctx(), w.ID)
-	if got.RunStatus != shared.RunSucceeded {
-		t.Fatalf("run_status = %q, want succeeded", got.RunStatus)
+	if got.Runs[0].Status != shared.RunSucceeded {
+		t.Fatalf("dev status = %q, want succeeded", got.Runs[0].Status)
+	}
+}
+
+func TestRequestRunOfflineDaemon(t *testing.T) {
+	s := NewStore(testPool)
+	// ready but the owning daemon never checked in → offline
+	w, err := s.CreateWorktreeRow(ctx(), newIssueID(), "WAT-5", testWorkspaceID, repoA)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	_, _ = s.ClaimInitJobs(ctx(), "ghost-daemon", testWorkspaceID)
+	_, _ = s.ReportStatus(ctx(), "ghost-daemon", w.ID, shared.StatusReport{Kind: shared.JobInit, Status: shared.StatusReady, RunScripts: []string{"dev"}})
+	if _, err := s.RequestRun(ctx(), w.ID, "dev"); err != ErrDaemonOffline {
+		t.Fatalf("RequestRun(offline) = %v, want ErrDaemonOffline", err)
+	}
+}
+
+func TestRequestSetupRerun(t *testing.T) {
+	s := NewStore(testPool)
+	// no setup discovered → ErrNoSetupScript
+	noSetup := makeReady(t, s, newIssueID(), "WAT-6", repoB, "daemon-1", shared.StatusReport{HasSetup: false})
+	if _, err := s.RequestSetup(ctx(), noSetup.ID); err != ErrNoSetupScript {
+		t.Fatalf("RequestSetup(no setup) = %v, want ErrNoSetupScript", err)
 	}
 
-	// no run script configured → ErrNoRunScript
-	_ = s.PutConfig(ctx(), testWorkspaceID, shared.Config{Repos: []shared.RepoScript{{RepoURL: repoA}}})
-	if _, err := s.RequestRun(ctx(), w.ID); err != ErrNoRunScript {
-		t.Fatalf("RequestRun(no script) = %v, want ErrNoRunScript", err)
+	w := makeReady(t, s, newIssueID(), "WAT-8", repoA, "daemon-1", shared.StatusReport{
+		SetupStatus: shared.ScriptSucceeded, HasSetup: true,
+	})
+	out, err := s.RequestSetup(ctx(), w.ID)
+	if err != nil {
+		t.Fatalf("RequestSetup(ready) = %v, want success", err)
+	}
+	if out.SetupStatus != shared.ScriptRunning || out.SetupTaskID == "" {
+		t.Fatalf("after RequestSetup = %+v, want setup running + setup_task_id", out)
+	}
+
+	// daemon claims a setup job (setup channel travels; script body does not)
+	actions, err := s.ClaimWorktreeActionJobs(ctx(), "daemon-1")
+	if err != nil {
+		t.Fatalf("ClaimWorktreeActionJobs: %v", err)
+	}
+	var setupJob *shared.Job
+	for i := range actions {
+		if actions[i].WorktreeID == w.ID {
+			setupJob = &actions[i]
+		}
+	}
+	if setupJob == nil || setupJob.Kind != shared.JobSetup || setupJob.SetupTaskID != out.SetupTaskID {
+		t.Fatalf("setup action job = %+v, want setup/setup_task_id", setupJob)
+	}
+
+	// report setup result — only setup_status changes, worktree stays ready
+	if _, err := s.ReportStatus(ctx(), "daemon-1", w.ID, shared.StatusReport{Kind: shared.JobSetup, SetupStatus: shared.ScriptFailed, Error: "boom"}); err != nil {
+		t.Fatalf("report setup: %v", err)
+	}
+	got, _ := s.Get(ctx(), w.ID)
+	if got.SetupStatus != shared.ScriptFailed || got.Status != shared.StatusReady {
+		t.Fatalf("after setup report = status %q setup %q, want ready + failed", got.Status, got.SetupStatus)
 	}
 }
 
 func TestMarkCleanupForIssue(t *testing.T) {
 	s := NewStore(testPool)
 	issueID := newIssueID()
-	ready, _ := s.CreateWorktreeRow(ctx(), issueID, testWorkspaceID, repoA)
-	pending, _ := s.CreateWorktreeRow(ctx(), issueID, testWorkspaceID, repoB)
-	// promote `ready` to ready
-	_, _ = s.ClaimInitJobs(ctx(), "daemon-1", testWorkspaceID)
-	_, _ = s.ReportStatus(ctx(), "daemon-1", ready.ID, shared.StatusReport{Kind: shared.JobInit, Status: shared.StatusReady})
-	// force `pending` back to pending (claim moved it to initializing)
-	_, _ = testPool.Exec(ctx(), `UPDATE issue_worktree SET status='pending', owner_daemon_id='' WHERE id=$1`, pending.ID)
+	ready := makeReady(t, s, issueID, "WAT-9", repoA, "daemon-1", shared.StatusReport{})
+	pending, _ := s.CreateWorktreeRow(ctx(), issueID, "WAT-9", testWorkspaceID, repoB)
 
 	if _, err := s.MarkCleanupForIssue(ctx(), issueID); err != nil {
 		t.Fatalf("MarkCleanupForIssue: %v", err)
@@ -363,122 +479,175 @@ func TestMarkCleanupForIssue(t *testing.T) {
 	}
 }
 
-func TestRequestSetupRerun(t *testing.T) {
+func TestIssueStatusReadiness(t *testing.T) {
+	s := NewStore(testPool)
+	// unmanaged issue → managed false
+	st, err := s.IssueStatus(ctx(), newIssueID(), testWorkspaceID)
+	if err != nil {
+		t.Fatalf("IssueStatus: %v", err)
+	}
+	if st.Managed || len(st.Worktrees) != 0 {
+		t.Fatalf("unmanaged issue = %+v, want managed=false", st)
+	}
+
+	issueID := newIssueID()
+	w := makeReady(t, s, issueID, "WAT-10", repoA, "daemon-1", shared.StatusReport{SetupStatus: shared.ScriptSucceeded})
+	st, _ = s.IssueStatus(ctx(), issueID, testWorkspaceID)
+	if !st.Managed || len(st.Worktrees) != 1 || st.Worktrees[0].Status != shared.StatusReady {
+		t.Fatalf("managed issue = %+v, want one ready worktree", st)
+	}
+	_ = w
+}
+
+// A late init report for an issue that was closed mid-checkout must NOT
+// resurrect the removed worktree (it would orphan an on-disk tree for a closed
+// issue that never gets cleaned up).
+func TestReportInitDoesNotResurrectRemoved(t *testing.T) {
 	s := NewStore(testPool)
 	issueID := newIssueID()
-	_ = s.PutConfig(ctx(), testWorkspaceID, shared.Config{Repos: []shared.RepoScript{{RepoURL: repoA, Setup: "make setup"}}})
-	w, err := s.CreateWorktreeRow(ctx(), issueID, testWorkspaceID, repoA)
+	w, err := s.CreateWorktreeRow(ctx(), issueID, "WAT-50", testWorkspaceID, repoA)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if !w.HasSetupScript {
-		t.Fatalf("row should report has_setup_script")
-	}
-
-	// pending → not ready
-	if _, err := s.RequestSetup(ctx(), w.ID); err != ErrNotReady {
-		t.Fatalf("RequestSetup(pending) = %v, want ErrNotReady", err)
-	}
-
-	// make ready, owned, online
+	// claim → initializing (owned), then the issue closes mid-checkout → removed.
 	if _, err := s.ClaimInitJobs(ctx(), "daemon-1", testWorkspaceID); err != nil {
 		t.Fatalf("claim: %v", err)
 	}
-	if _, err := s.ReportStatus(ctx(), "daemon-1", w.ID, shared.StatusReport{Kind: shared.JobInit, Status: shared.StatusReady, SetupStatus: shared.ScriptSucceeded}); err != nil {
-		t.Fatalf("report ready: %v", err)
+	if _, err := s.MarkCleanupForIssue(ctx(), issueID); err != nil {
+		t.Fatalf("cleanup: %v", err)
 	}
-	if err := s.TouchDaemon(ctx(), testWorkspaceID, "daemon-1"); err != nil {
-		t.Fatalf("touch: %v", err)
+	if g, _ := s.Get(ctx(), w.ID); g.Status != shared.StatusRemoved {
+		t.Fatalf("expected removed after cleanup of an initializing row, got %q", g.Status)
 	}
+	// The daemon finishes and posts a late init report — it must be a no-op.
+	if _, err := s.ReportStatus(ctx(), "daemon-1", w.ID, shared.StatusReport{
+		Kind: shared.JobInit, Status: shared.StatusReady, RunScripts: []string{"dev"},
+	}); err != nil {
+		t.Fatalf("late report: %v", err)
+	}
+	g, _ := s.Get(ctx(), w.ID)
+	if g.Status != shared.StatusRemoved {
+		t.Fatalf("late init report resurrected the worktree to %q", g.Status)
+	}
+	if len(g.Runs) != 0 {
+		t.Fatalf("late init report recreated run rows: %+v", g.Runs)
+	}
+}
 
-	out, err := s.RequestSetup(ctx(), w.ID)
+// Reopening a previously-closed, still-assigned issue must recreate its
+// workspace: CreateWorktreeRow re-arms the removed tombstone back to pending.
+func TestReopenReactivatesRemovedWorktree(t *testing.T) {
+	s := NewStore(testPool)
+	issueID := newIssueID()
+	w := makeReady(t, s, issueID, "WAT-51", repoA, "daemon-1", shared.StatusReport{RunScripts: []string{"dev"}})
+	// close it: ready → cleaning → removed.
+	if _, err := s.MarkCleanupForIssue(ctx(), issueID); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if _, err := s.ReportStatus(ctx(), "daemon-1", w.ID, shared.StatusReport{Kind: shared.JobCleanup}); err != nil {
+		t.Fatalf("report cleanup: %v", err)
+	}
+	if g, _ := s.Get(ctx(), w.ID); g.Status != shared.StatusRemoved {
+		t.Fatalf("expected removed, got %q", g.Status)
+	}
+	// reopen + still assigned → the row is reactivated to a clean pending state.
+	re, err := s.CreateWorktreeRow(ctx(), issueID, "WAT-51", testWorkspaceID, repoA)
 	if err != nil {
-		t.Fatalf("RequestSetup(ready) = %v, want success", err)
+		t.Fatalf("recreate: %v", err)
 	}
-	if out.SetupStatus != shared.ScriptRunning || out.SetupTaskID == "" {
-		t.Fatalf("after RequestSetup = %+v, want setup running + setup_task_id", out)
+	if re.Status != shared.StatusPending || re.OwnerDaemonID != "" || len(re.Runs) != 0 {
+		t.Fatalf("reactivated row = %+v, want pending + no owner + no runs", re)
 	}
-
-	// daemon claims a setup job (with the setup script + setup channel)
-	actions, err := s.ClaimActionJobs(ctx(), "daemon-1")
-	if err != nil {
-		t.Fatalf("ClaimActionJobs: %v", err)
-	}
-	var setupJob *shared.Job
-	for i := range actions {
-		if actions[i].WorktreeID == w.ID {
-			setupJob = &actions[i]
+	// and it is re-claimable by the daemon.
+	jobs, _ := s.ClaimInitJobs(ctx(), "daemon-1", testWorkspaceID)
+	found := false
+	for _, j := range jobs {
+		if j.WorktreeID == re.ID {
+			found = true
 		}
 	}
-	if setupJob == nil || setupJob.Kind != shared.JobSetup || setupJob.Setup != "make setup" || setupJob.SetupTaskID != out.SetupTaskID {
-		t.Fatalf("setup action job = %+v, want setup/script/setup_task_id", setupJob)
+	if !found {
+		t.Fatalf("reactivated worktree was not re-claimed by ClaimInitJobs")
 	}
+}
 
-	// report setup result — only setup_status changes
-	if _, err := s.ReportStatus(ctx(), "daemon-1", w.ID, shared.StatusReport{Kind: shared.JobSetup, SetupStatus: shared.ScriptFailed, Error: "boom"}); err != nil {
-		t.Fatalf("report setup: %v", err)
+// A daemon restart leaves 'running' run rows behind (their OS processes died);
+// the reconcile resets them so Stop/Run work again.
+func TestReconcileResetsStaleRuns(t *testing.T) {
+	s := NewStore(testPool)
+	w := makeReady(t, s, newIssueID(), "WAT-52", repoA, "daemon-1", shared.StatusReport{RunScripts: []string{"dev"}})
+	if _, err := s.RequestRun(ctx(), w.ID, "dev"); err != nil {
+		t.Fatalf("run: %v", err)
 	}
-	got, _ := s.Get(ctx(), w.ID)
-	if got.SetupStatus != shared.ScriptFailed || got.Status != shared.StatusReady {
-		t.Fatalf("after setup report = status %q setup %q, want ready + failed", got.Status, got.SetupStatus)
+	// simulate daemon restart reconciling the workspace.
+	if err := s.ResetRunningRuns(ctx(), "daemon-1", testWorkspaceID); err != nil {
+		t.Fatalf("reconcile: %v", err)
 	}
-
-	// no setup script configured → ErrNoSetupScript
-	_ = s.PutConfig(ctx(), testWorkspaceID, shared.Config{Repos: []shared.RepoScript{{RepoURL: repoA}}})
-	if _, err := s.RequestSetup(ctx(), w.ID); err != ErrNoSetupScript {
-		t.Fatalf("RequestSetup(no script) = %v, want ErrNoSetupScript", err)
+	g, _ := s.Get(ctx(), w.ID)
+	if len(g.Runs) != 1 || g.Runs[0].Status != shared.RunStopped {
+		t.Fatalf("after reconcile, runs = %+v, want dev stopped", g.Runs)
+	}
+	// the stuck run is runnable again.
+	if _, err := s.RequestRun(ctx(), w.ID, "dev"); err != nil {
+		t.Fatalf("re-run after reconcile = %v, want success", err)
 	}
 }
 
 // --- listener tests ---
 
-func TestListenerAutoInit(t *testing.T) {
+func TestListenerCheckoutOnAssignment(t *testing.T) {
 	sink := &eventSink{}
-	m := newTestModule("owner", "daemon-1", sink)
+	m := newTestModule("owner", sink)
 
-	// auto_init OFF → no rows created
-	_ = m.store.PutConfig(ctx(), testWorkspaceID, shared.Config{AutoInit: false})
-	offIssue := newIssueID()
-	m.onIssueCreated(IssueEvent{Type: "issue:created", WorkspaceID: testWorkspaceID, IssueID: offIssue})
-	if rows, _ := m.store.ListByIssue(ctx(), offIssue, testWorkspaceID); len(rows) != 0 {
-		t.Fatalf("auto_init off created %d rows, want 0", len(rows))
+	// unassigned → no rows
+	unassigned := newIssueID()
+	m.onIssueEvent(IssueEvent{Type: "issue:created", WorkspaceID: testWorkspaceID, IssueID: unassigned, Status: "todo"})
+	if rows, _ := m.store.ListByIssue(ctx(), unassigned, testWorkspaceID); len(rows) != 0 {
+		t.Fatalf("unassigned issue created %d rows, want 0", len(rows))
 	}
 
-	// auto_init ON → one row per workspace repo (2)
-	_ = m.store.PutConfig(ctx(), testWorkspaceID, shared.Config{AutoInit: true})
+	// assigned to an agent but parked in backlog → no rows
+	backlog := newIssueID()
+	m.onIssueEvent(IssueEvent{Type: "issue:updated", WorkspaceID: testWorkspaceID, IssueID: backlog, Identifier: "WAT-20", Status: "backlog", AssigneeType: "agent", AssigneeID: "a1", AssigneeChanged: true})
+	if rows, _ := m.store.ListByIssue(ctx(), backlog, testWorkspaceID); len(rows) != 0 {
+		t.Fatalf("backlog assign created %d rows, want 0", len(rows))
+	}
+
+	// assigned to an agent in a workable status → one row per repo, with identifier
 	onIssue := newIssueID()
-	m.onIssueCreated(IssueEvent{Type: "issue:created", WorkspaceID: testWorkspaceID, IssueID: onIssue})
+	m.onIssueEvent(IssueEvent{Type: "issue:updated", WorkspaceID: testWorkspaceID, IssueID: onIssue, Identifier: "WAT-21", Status: "todo", AssigneeType: "agent", AssigneeID: "a1", AssigneeChanged: true})
 	rows, _ := m.store.ListByIssue(ctx(), onIssue, testWorkspaceID)
 	if len(rows) != 2 {
-		t.Fatalf("auto_init on created %d rows, want 2 (one per repo)", len(rows))
+		t.Fatalf("agent assign created %d rows, want 2 (one per repo)", len(rows))
+	}
+	for _, r := range rows {
+		if r.Identifier != "WAT-21" {
+			t.Fatalf("row identifier = %q, want WAT-21", r.Identifier)
+		}
 	}
 	if sink.count(shared.EventWorktreeUpdated) < 2 {
 		t.Fatalf("expected >= 2 worktree:updated events, got %d", sink.count(shared.EventWorktreeUpdated))
 	}
 }
 
-func TestListenerCleanupOnlyOnTransitionIntoDone(t *testing.T) {
+func TestListenerCleanupOnDoneOrCancelled(t *testing.T) {
 	sink := &eventSink{}
-	m := newTestModule("owner", "daemon-1", sink)
-	issueID := newIssueID()
-	row, _ := m.store.CreateWorktreeRow(ctx(), issueID, testWorkspaceID, repoA)
-	_, _ = m.store.ClaimInitJobs(ctx(), "daemon-1", testWorkspaceID)
-	_, _ = m.store.ReportStatus(ctx(), "daemon-1", row.ID, shared.StatusReport{Kind: shared.JobInit, Status: shared.StatusReady})
+	m := newTestModule("owner", sink)
 
-	// not a status change → no-op
-	m.onIssueUpdated(IssueEvent{Type: "issue:updated", WorkspaceID: testWorkspaceID, IssueID: issueID, Status: "done", PrevStatus: "done", StatusChanged: false})
-	if g, _ := m.store.Get(ctx(), row.ID); g.Status != shared.StatusReady {
-		t.Fatalf("no-op transition changed status to %q", g.Status)
-	}
-	// transition to a non-done status → no-op
-	m.onIssueUpdated(IssueEvent{Type: "issue:updated", WorkspaceID: testWorkspaceID, IssueID: issueID, Status: "in_progress", PrevStatus: "todo", StatusChanged: true})
-	if g, _ := m.store.Get(ctx(), row.ID); g.Status != shared.StatusReady {
-		t.Fatalf("in_progress transition changed status to %q", g.Status)
-	}
-	// transition INTO done → cleaning
-	m.onIssueUpdated(IssueEvent{Type: "issue:updated", WorkspaceID: testWorkspaceID, IssueID: issueID, Status: "done", PrevStatus: "in_progress", StatusChanged: true})
-	if g, _ := m.store.Get(ctx(), row.ID); g.Status != shared.StatusCleaning {
-		t.Fatalf("done transition status = %q, want cleaning", g.Status)
+	for _, terminal := range []string{"done", "cancelled"} {
+		issueID := newIssueID()
+		row := makeReady(t, m.store, issueID, "WAT-30", repoA, "daemon-1", shared.StatusReport{})
+
+		// not a status change → no-op
+		m.onIssueEvent(IssueEvent{Type: "issue:updated", WorkspaceID: testWorkspaceID, IssueID: issueID, Status: terminal, PrevStatus: terminal, StatusChanged: false})
+		if g, _ := m.store.Get(ctx(), row.ID); g.Status != shared.StatusReady {
+			t.Fatalf("[%s] no-op transition changed status to %q", terminal, g.Status)
+		}
+		// transition INTO terminal → cleaning
+		m.onIssueEvent(IssueEvent{Type: "issue:updated", WorkspaceID: testWorkspaceID, IssueID: issueID, Status: terminal, PrevStatus: "in_progress", StatusChanged: true})
+		if g, _ := m.store.Get(ctx(), row.ID); g.Status != shared.StatusCleaning {
+			t.Fatalf("[%s] transition status = %q, want cleaning", terminal, g.Status)
+		}
 	}
 }
 
@@ -486,10 +655,10 @@ func TestListenerCleanupOnlyOnTransitionIntoDone(t *testing.T) {
 
 func TestHTTPListAndRunGating(t *testing.T) {
 	sink := &eventSink{}
-	m := newTestModule("owner", "daemon-1", sink)
+	m := newTestModule("owner", sink)
 	router := testRouter(m)
 	issueID := newIssueID()
-	row, _ := m.store.CreateWorktreeRow(ctx(), issueID, testWorkspaceID, repoA)
+	row, _ := m.store.CreateWorktreeRow(ctx(), issueID, "WAT-40", testWorkspaceID, repoA)
 
 	// GET list
 	w := httptest.NewRecorder()
@@ -504,98 +673,70 @@ func TestHTTPListAndRunGating(t *testing.T) {
 
 	// POST run on a pending worktree → 409
 	w = httptest.NewRecorder()
-	router.ServeHTTP(w, httptest.NewRequest("POST", "/api/worktree/issues/"+issueID+"/"+row.ID+"/run", nil))
+	router.ServeHTTP(w, httptest.NewRequest("POST", "/api/worktree/issues/"+issueID+"/"+row.ID+"/run", strings.NewReader(`{"name":"dev"}`)))
 	if w.Code != http.StatusConflict {
 		t.Fatalf("POST run(pending) = %d, want 409: %s", w.Code, w.Body.String())
 	}
-}
 
-func TestHTTPConfigPermissions(t *testing.T) {
-	sink := &eventSink{}
-	owner := testRouter(newTestModule("owner", "daemon-1", sink))
-	member := testRouter(newTestModule("member", "daemon-1", sink))
-
-	body := `{"auto_init":true,"repos":[{"repo_url":"https://example.com/a.git","setup":"s","run":"r","cleanup":"c"}]}`
-
-	// member cannot write
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("PUT", "/api/worktree/config", strings.NewReader(body))
-	member.ServeHTTP(w, req)
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("member PUT config = %d, want 403", w.Code)
-	}
-
-	// owner can write
+	// POST run with no name → 400
 	w = httptest.NewRecorder()
-	req = httptest.NewRequest("PUT", "/api/worktree/config", strings.NewReader(body))
-	owner.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("owner PUT config = %d, want 200: %s", w.Code, w.Body.String())
-	}
-
-	// GET reflects it
-	w = httptest.NewRecorder()
-	owner.ServeHTTP(w, httptest.NewRequest("GET", "/api/worktree/config", nil))
-	var cfg shared.Config
-	_ = json.NewDecoder(w.Body).Decode(&cfg)
-	if !cfg.AutoInit || len(cfg.Repos) != 1 {
-		t.Fatalf("GET config = %+v, want auto_init + 1 repo", cfg)
+	router.ServeHTTP(w, httptest.NewRequest("POST", "/api/worktree/issues/"+issueID+"/"+row.ID+"/run", strings.NewReader(`{}`)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("POST run(no name) = %d, want 400: %s", w.Code, w.Body.String())
 	}
 }
 
 func TestHTTPDaemonLogStreaming(t *testing.T) {
 	sink := &eventSink{}
-	m := newTestModule("owner", "daemon-1", sink)
+	m := newTestModule("owner", sink)
 	router := testRouter(m)
-	issueID := newIssueID()
-	_ = m.store.PutConfig(ctx(), testWorkspaceID, shared.Config{Repos: []shared.RepoScript{{RepoURL: repoA, Run: "x"}}})
-	row, _ := m.store.CreateWorktreeRow(ctx(), issueID, testWorkspaceID, repoA)
-	_, _ = m.store.ClaimInitJobs(ctx(), "daemon-1", testWorkspaceID)
-	_, _ = m.store.ReportStatus(ctx(), "daemon-1", row.ID, shared.StatusReport{Kind: shared.JobInit, Status: shared.StatusReady})
-	_ = m.store.TouchDaemon(ctx(), testWorkspaceID, "daemon-1")
-	armed, err := m.store.RequestRun(ctx(), row.ID)
+	w := makeReady(t, m.store, newIssueID(), "WAT-41", repoA, "daemon-1", shared.StatusReport{RunScripts: []string{"dev"}})
+	armed, err := m.store.RequestRun(ctx(), w.ID, "dev")
 	if err != nil {
 		t.Fatalf("RequestRun: %v", err)
+	}
+	var runTaskID string
+	for _, r := range armed.Runs {
+		if r.Name == "dev" {
+			runTaskID = r.RunTaskID
+		}
 	}
 
 	before := sink.count(shared.EventWorktreeRunLog)
 	body := `{"lines":[{"seq":1,"stream":"stdout","content":"hello"},{"seq":2,"stream":"stderr","content":"warn"}]}`
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, httptest.NewRequest("POST", "/api/daemon/worktree/runs/"+armed.RunTaskID+"/logs", strings.NewReader(body)))
-	if w.Code != http.StatusNoContent {
-		t.Fatalf("POST logs = %d, want 204: %s", w.Code, w.Body.String())
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest("POST", "/api/daemon/worktree/runs/"+runTaskID+"/logs", strings.NewReader(body)))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("POST logs = %d, want 204: %s", rec.Code, rec.Body.String())
 	}
 	if got := sink.count(shared.EventWorktreeRunLog) - before; got != 2 {
 		t.Fatalf("published %d run-log events, want 2", got)
 	}
 }
 
-// Setup logs stream to setup_task_id, a different channel than run_task_id; the
-// log endpoint must resolve the worktree from either (GetByRunTaskID).
+// Setup logs stream to setup_task_id, a different channel than a run's
+// run_task_id; the log endpoint resolves the worktree from either.
 func TestHTTPDaemonSetupLogStreaming(t *testing.T) {
 	sink := &eventSink{}
-	m := newTestModule("owner", "daemon-1", sink)
+	m := newTestModule("owner", sink)
 	router := testRouter(m)
-	issueID := newIssueID()
-	_ = m.store.PutConfig(ctx(), testWorkspaceID, shared.Config{Repos: []shared.RepoScript{{RepoURL: repoA, Setup: "make"}}})
-	row, _ := m.store.CreateWorktreeRow(ctx(), issueID, testWorkspaceID, repoA)
-	_, _ = m.store.ClaimInitJobs(ctx(), "daemon-1", testWorkspaceID)
-	_, _ = m.store.ReportStatus(ctx(), "daemon-1", row.ID, shared.StatusReport{Kind: shared.JobInit, Status: shared.StatusReady, SetupStatus: shared.ScriptSucceeded})
-	_ = m.store.TouchDaemon(ctx(), testWorkspaceID, "daemon-1")
-	armed, err := m.store.RequestSetup(ctx(), row.ID)
+	w := makeReady(t, m.store, newIssueID(), "WAT-42", repoA, "daemon-1", shared.StatusReport{
+		SetupStatus: shared.ScriptSucceeded, HasSetup: true,
+	})
+	armed, err := m.store.RequestSetup(ctx(), w.ID)
 	if err != nil {
 		t.Fatalf("RequestSetup: %v", err)
 	}
-	if armed.SetupTaskID == "" || armed.SetupTaskID == armed.RunTaskID {
-		t.Fatalf("setup channel = %q (run %q), want a distinct non-empty id", armed.SetupTaskID, armed.RunTaskID)
+	if armed.SetupTaskID == "" {
+		t.Fatalf("setup channel empty")
 	}
 
 	before := sink.count(shared.EventWorktreeRunLog)
 	body := `{"lines":[{"seq":1,"stream":"stdout","content":"setup line"}]}`
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, httptest.NewRequest("POST", "/api/daemon/worktree/runs/"+armed.SetupTaskID+"/logs", strings.NewReader(body)))
-	if w.Code != http.StatusNoContent {
-		t.Fatalf("POST setup logs = %d, want 204: %s", w.Code, w.Body.String())
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest("POST", "/api/daemon/worktree/runs/"+armed.SetupTaskID+"/logs", strings.NewReader(body)))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("POST setup logs = %d, want 204: %s", rec.Code, rec.Body.String())
 	}
 	if got := sink.count(shared.EventWorktreeRunLog) - before; got != 1 {
 		t.Fatalf("published %d setup-log events, want 1", got)

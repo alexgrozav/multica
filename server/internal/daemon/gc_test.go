@@ -857,6 +857,10 @@ func (c *blockingRepoCache) Sync(workspaceID string, repos []repocache.RepoInfo)
 	return c.inner.Sync(workspaceID, repos)
 }
 
+func (c *blockingRepoCache) Fetch(barePath string) error {
+	return c.inner.Fetch(barePath)
+}
+
 func (c *blockingRepoCache) WithRepoLock(barePath string, fn func() error) error {
 	return c.inner.WithRepoLock(barePath, func() error {
 		close(c.entered)

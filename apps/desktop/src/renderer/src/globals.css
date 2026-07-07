@@ -54,6 +54,8 @@ html[lang|="ja"] {
 @source "../../../../../packages/ui/**/*.tsx";
 @source "../../../../../packages/core/**/*.{ts,tsx}";
 @source "../../../../../packages/views/**/*.{ts,tsx}";
+/* Scoped to src/ (not **) so Tailwind never walks the package's node_modules. */
+@source "../../../../../packages/worktrees-addon/src/**/*.{ts,tsx}";
 @source "./**/*.tsx";
 
 /* Desktop-specific: override sidebar container padding for traffic light layout */

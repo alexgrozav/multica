@@ -324,6 +324,10 @@ func (c *blockingLookupRepoCache) Sync(string, []repocache.RepoInfo) error {
 	return nil
 }
 
+func (c *blockingLookupRepoCache) Fetch(string) error {
+	return nil
+}
+
 func (c *blockingLookupRepoCache) WithRepoLock(_ string, fn func() error) error {
 	return fn()
 }
@@ -343,6 +347,10 @@ func (c *recordingRepoCache) Lookup(_, _ string) string {
 }
 
 func (c *recordingRepoCache) Sync(string, []repocache.RepoInfo) error {
+	return nil
+}
+
+func (c *recordingRepoCache) Fetch(string) error {
 	return nil
 }
 

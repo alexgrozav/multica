@@ -31,20 +31,59 @@ type Principal struct {
 	Role        string // "owner" | "admin" | "member"
 }
 
-// CanManage reports whether the principal may edit worktree config.
-func (p Principal) CanManage() bool { return p.Role == "owner" || p.Role == "admin" }
-
 // IssueEvent is the host-agnostic shape of an issue lifecycle event. The adapter
 // translates the host's events.Event (a map payload) into this struct so the
 // module never imports host event/payload types.
+//
+// Checkout is triggered on assignment, so the event carries the assignee + the
+// human identifier (e.g. PRO-11, used as the worktree branch name), not just the
+// status fields the cleanup reaction needs.
 type IssueEvent struct {
-	Type          string // "issue:created" | "issue:updated"
-	WorkspaceID   string
-	IssueID       string
-	Status        string
-	PrevStatus    string
-	StatusChanged bool
+	Type             string // "issue:created" | "issue:updated"
+	WorkspaceID      string
+	IssueID          string
+	Identifier       string
+	Status           string
+	PrevStatus       string
+	StatusChanged    bool
+	AssigneeType     string // "agent" | "squad" | "member" | ""
+	AssigneeID       string
+	PrevAssigneeType string
+	AssigneeChanged  bool
 }
+
+// assignedToAgent reports whether the issue is currently owned by an agent or a
+// squad (the only assignees that run in a checked-out workspace).
+func (e IssueEvent) assignedToAgent() bool {
+	return e.AssigneeType == "agent" || e.AssigneeType == "squad"
+}
+
+// workable reports whether the issue is in a status where an agent would work —
+// i.e. not parked in backlog and not already closed.
+func (e IssueEvent) workable() bool {
+	switch e.Status {
+	case "", "backlog", "done", "cancelled":
+		return false
+	default:
+		return true
+	}
+}
+
+// shouldCheckout is the single predicate for "this issue needs a checked-out
+// workspace": it is assigned to an agent/squad, in a workable status, and this
+// event actually (re)assigned or activated it — a new issue, an assignee change,
+// or a status change (e.g. backlog → active). Gating on the change keeps an
+// unrelated field edit (title, priority) of an already-assigned, active issue
+// from re-emitting worktree events. Row creation is still idempotent.
+func (e IssueEvent) shouldCheckout() bool {
+	if !e.assignedToAgent() || !e.workable() {
+		return false
+	}
+	return e.Type == "issue:created" || e.AssigneeChanged || e.StatusChanged
+}
+
+// terminal reports whether a status is a closed state (cleanup trigger).
+func isTerminal(status string) bool { return status == "done" || status == "cancelled" }
 
 // Deps is the port through which the host supplies everything the server module
 // needs. Every field is populated by the adapter.

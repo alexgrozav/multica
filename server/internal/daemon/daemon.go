@@ -145,6 +145,7 @@ type workspaceState struct {
 type repoCacheBackend interface {
 	Lookup(workspaceID, url string) string
 	Sync(workspaceID string, repos []repocache.RepoInfo) error
+	Fetch(barePath string) error
 	WithRepoLock(barePath string, fn func() error) error
 	CreateWorktree(params repocache.WorktreeParams) (*repocache.WorktreeResult, error)
 }
@@ -3592,7 +3593,30 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if task.Agent != nil && provider == "openclaw" {
 		openclawMode, openclawGateway = decodeOpenclawRuntimeConfig(task.Agent.RuntimeConfig, d.logger)
 	}
-	if task.PriorWorkDir != "" && localAssignment == nil && !task.IsLeaderTask {
+	// worktrees add-on: the per-issue worktree is the SINGLE authoritative
+	// workspace for every task, agent, and conversation turn on the issue. When
+	// the issue is worktree-managed we always resolve to it — reusing it in
+	// place once a prior turn has scaffolded it (IsPreparedEnv), otherwise a
+	// first Prepare with the override below — and never let a stale per-task
+	// PriorWorkDir (e.g. a legacy pre-unified run) strand the agent in a
+	// throwaway workdir. Non-managed tasks keep the base (agent, issue) reuse.
+	perIssueDir := ""
+	if localAssignment == nil {
+		perIssueDir = d.issueWorktreeWorkDir(task)
+	}
+	switch {
+	case perIssueDir != "" && execenv.IsPreparedEnv(perIssueDir):
+		env = execenv.Reuse(execenv.ReuseParams{
+			WorkDir:         perIssueDir,
+			RootDir:         perIssueDir,
+			Provider:        provider,
+			CodexVersion:    codexVersion,
+			OpenclawBin:     openclawBin,
+			McpConfig:       agentMcpConfig,
+			OpenclawGateway: openclawGateway,
+			Task:            taskCtx,
+		}, d.logger)
+	case perIssueDir == "" && task.PriorWorkDir != "" && localAssignment == nil && !task.IsLeaderTask:
 		env = execenv.Reuse(execenv.ReuseParams{
 			WorkDir:         task.PriorWorkDir,
 			Provider:        provider,
@@ -3623,7 +3647,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			// worktrees add-on: make the agent work IN the per-issue worktree the
 			// sidebar controls (unified model), instead of a throwaway per-task
 			// workdir. "" keeps the default behavior.
-			prepParams.WorkDirOverride = d.issueWorktreeWorkDir(task)
+			prepParams.WorkDirOverride = perIssueDir
 		}
 		env, err = execenv.Prepare(prepParams, d.logger)
 		if err != nil {
@@ -3648,8 +3672,8 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// records it and the agent never runs (the prepare lease is released by the
 	// deferred stopPrepareLease above).
 	unifiedDir := ""
-	if pid := d.issueWorktreeWorkDir(task); pid != "" && env.WorkDir == pid {
-		unifiedDir = pid
+	if perIssueDir != "" && env.WorkDir == perIssueDir {
+		unifiedDir = perIssueDir
 	}
 	if err := d.eagerCheckoutTaskRepos(ctx, task, env, agentName, unifiedDir); err != nil {
 		return TaskResult{}, err

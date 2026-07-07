@@ -737,8 +737,10 @@ describe("IssueDetail (shared)", () => {
     // Default fixture already has metadata: {}, asserted explicitly here.
     renderIssueDetail();
 
+    // role=button targets the sidebar's Details section header — the sidebar
+    // tab strip has a role=tab "Details" too, so a bare text query is ambiguous.
     await waitFor(() => {
-      expect(screen.getByText("Details")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Details" })).toBeInTheDocument();
     });
 
     expect(screen.queryByRole("button", { name: /^Metadata\b/ })).not.toBeInTheDocument();
@@ -748,7 +750,7 @@ describe("IssueDetail (shared)", () => {
     renderIssueDetail();
 
     await waitFor(() => {
-      expect(screen.getByText("Details")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Details" })).toBeInTheDocument();
     });
 
     expect(screen.getByText("Created by")).toBeInTheDocument();

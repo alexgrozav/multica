@@ -10,6 +10,8 @@
 @source "../../../packages/ui/**/*.{ts,tsx}";
 @source "../../../packages/core/**/*.{ts,tsx}";
 @source "../../../packages/views/**/*.{ts,tsx}";
+/* Scoped to src/ (not **) so Tailwind never walks the package's node_modules. */
+@source "../../../packages/worktrees-addon/src/**/*.{ts,tsx}";
 
 /* Font stack. `--font-inter` is the next/font Inter family (+ its synthetic
    size-adjusted fallback), set on <html> by inter.variable in app/layout.tsx.

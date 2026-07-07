@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -36,7 +38,17 @@ func worktreeAddon(pool *pgxpool.Pool, bus *events.Bus) *worktreesserver.Module 
 				bus.Publish(events.Event{Type: eventType, WorkspaceID: workspaceID, ActorType: "system", Payload: payload})
 			},
 			Subscribe: func(eventType string, handler func(worktreesserver.IssueEvent)) {
-				bus.Subscribe(eventType, func(e events.Event) { handler(translateIssueEvent(e)) })
+				bus.Subscribe(eventType, func(e events.Event) {
+					ev := translateIssueEvent(e)
+					// Some publishers (e.g. the Lark /issue command) emit a minimal
+					// {issue_id} payload with no embedded issue object. Hydrate the
+					// fields the checkout trigger needs from the DB so those paths
+					// still check out an agent-assigned issue's workspace.
+					if ev.IssueID != "" && ev.WorkspaceID != "" && (ev.Status == "" || ev.AssigneeType == "") {
+						hydrateIssueEvent(pool, &ev)
+					}
+					handler(ev)
+				})
 			},
 			Principal: func(r *http.Request) (worktreesserver.Principal, bool) {
 				wsID := middleware.WorkspaceIDFromContext(r.Context())
@@ -87,6 +99,9 @@ func worktreeAddon(pool *pgxpool.Pool, bus *events.Bus) *worktreesserver.Module 
 
 // translateIssueEvent converts a host issue event (map payload) into the
 // add-on's host-agnostic IssueEvent, so the module never imports host types.
+// Everything the checkout trigger needs — the human identifier (→ branch name)
+// and the assignee — already rides in the host's issue payload, so this needs no
+// changes at the publish sites.
 func translateIssueEvent(e events.Event) worktreesserver.IssueEvent {
 	out := worktreesserver.IssueEvent{Type: e.Type, WorkspaceID: e.WorkspaceID}
 	m, ok := e.Payload.(map[string]any)
@@ -96,26 +111,42 @@ func translateIssueEvent(e events.Event) worktreesserver.IssueEvent {
 	if v, ok := m["status_changed"].(bool); ok {
 		out.StatusChanged = v
 	}
+	if v, ok := m["assignee_changed"].(bool); ok {
+		out.AssigneeChanged = v
+	}
 	if v, ok := m["prev_status"].(string); ok {
 		out.PrevStatus = v
+	}
+	if v, ok := m["prev_assignee_type"].(string); ok {
+		out.PrevAssigneeType = v
 	}
 	// The "issue" subfield may be a typed struct (HTTP path) or a map; round-trip
 	// through JSON to read the fields we need without importing the host type.
 	if iss, ok := m["issue"]; ok {
 		var tmp struct {
-			ID          string `json:"id"`
-			Status      string `json:"status"`
-			WorkspaceID string `json:"workspace_id"`
+			ID           string  `json:"id"`
+			Identifier   string  `json:"identifier"`
+			Status       string  `json:"status"`
+			WorkspaceID  string  `json:"workspace_id"`
+			AssigneeType *string `json:"assignee_type"`
+			AssigneeID   *string `json:"assignee_id"`
 		}
 		if b, err := json.Marshal(iss); err == nil {
 			_ = json.Unmarshal(b, &tmp)
 		}
 		out.IssueID = tmp.ID
+		out.Identifier = tmp.Identifier
 		if tmp.Status != "" {
 			out.Status = tmp.Status
 		}
 		if out.WorkspaceID == "" {
 			out.WorkspaceID = tmp.WorkspaceID
+		}
+		if tmp.AssigneeType != nil {
+			out.AssigneeType = *tmp.AssigneeType
+		}
+		if tmp.AssigneeID != nil {
+			out.AssigneeID = *tmp.AssigneeID
 		}
 	}
 	if out.IssueID == "" {
@@ -124,4 +155,37 @@ func translateIssueEvent(e events.Event) worktreesserver.IssueEvent {
 		}
 	}
 	return out
+}
+
+// hydrateIssueEvent fills the trigger-relevant fields (status, identifier,
+// assignee) from the DB for events published with only an issue_id. It mutates
+// ev in place, leaving already-populated fields untouched, and is a best-effort
+// no-op on any error.
+func hydrateIssueEvent(pool *pgxpool.Pool, ev *worktreesserver.IssueEvent) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	var status, prefix string
+	var number int32
+	var assigneeType, assigneeID *string
+	err := pool.QueryRow(ctx,
+		`SELECT i.status, i.number, i.assignee_type, i.assignee_id::text, w.issue_prefix
+		 FROM issue i JOIN workspace w ON w.id = i.workspace_id
+		 WHERE i.id = $1`, ev.IssueID).Scan(&status, &number, &assigneeType, &assigneeID, &prefix)
+	if err != nil {
+		slog.Debug("worktrees: hydrate issue event failed", "issue_id", ev.IssueID, "error", err)
+		return
+	}
+	if ev.Status == "" {
+		ev.Status = status
+	}
+	if ev.Identifier == "" && prefix != "" {
+		ev.Identifier = prefix + "-" + strconv.Itoa(int(number))
+	}
+	if ev.AssigneeType == "" && assigneeType != nil {
+		ev.AssigneeType = *assigneeType
+	}
+	if ev.AssigneeID == "" && assigneeID != nil {
+		ev.AssigneeID = *assigneeID
+	}
 }

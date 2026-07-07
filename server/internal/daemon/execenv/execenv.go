@@ -189,6 +189,19 @@ func PredictRootDir(workspacesRoot, workspaceID, taskID string) string {
 	return filepath.Join(workspacesRoot, workspaceID, shortID(taskID))
 }
 
+// IsPreparedEnv reports whether Prepare has already scaffolded dir — i.e. the
+// sidecar manifest Prepare always writes is present. The unified worktrees flow
+// uses it to choose between Reuse (a prior turn already prepared the per-issue
+// tree) and a first Prepare (the add-on checked out the worktrees but no agent
+// task has scaffolded the env there yet).
+func IsPreparedEnv(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dir, sidecarManifestFile))
+	return err == nil
+}
+
 // Prepare creates an isolated execution environment for a task.
 // The workdir starts empty (no repo checkouts). The agent checks out repos
 // on demand via `multica repo checkout <url>`.
@@ -221,8 +234,9 @@ func Prepare(params PrepareParams, logger *slog.Logger) (*Environment, error) {
 
 	// Create directory tree. Standard flow: workdir = envRoot/workdir. A
 	// local_directory task substitutes the user's path. A WorkDirOverride makes
-	// the per-issue dir itself the workdir (envRoot is created as the parent of
-	// output/, so no separate workdir subdir).
+	// the per-issue worktree itself the workdir; its bookkeeping scratch is
+	// nested under a hidden .multica-env/ so the tree root stays clean (just the
+	// runtime brief + the repo worktrees).
 	workDir := filepath.Join(envRoot, "workdir")
 	scratchDirs := []string{filepath.Join(envRoot, "output"), filepath.Join(envRoot, "logs")}
 	switch {
@@ -230,6 +244,7 @@ func Prepare(params PrepareParams, logger *slog.Logger) (*Environment, error) {
 		workDir = params.LocalWorkDir
 	case params.WorkDirOverride != "":
 		workDir = envRoot
+		scratchDirs = []string{filepath.Join(envRoot, ".multica-env", "output"), filepath.Join(envRoot, ".multica-env", "logs")}
 	default:
 		scratchDirs = append(scratchDirs, workDir)
 	}
@@ -314,7 +329,13 @@ func Prepare(params PrepareParams, logger *slog.Logger) (*Environment, error) {
 // the per-provider knobs (CodexVersion, OpenclawBin) so callers can pass
 // the same resolved binary path on both first-run and reuse paths.
 type ReuseParams struct {
-	WorkDir      string
+	WorkDir string
+	// RootDir overrides the env root on reuse. Reuse otherwise derives it as
+	// filepath.Dir(WorkDir), which is wrong when WorkDir is a shared per-issue
+	// worktree — its parent (the workspace's worktrees/ dir) is not a per-task root, so
+	// sidecar/skill cleanup would target the shared dir. The unified worktrees
+	// flow passes the per-issue dir as both WorkDir and RootDir. Empty = default.
+	RootDir      string
 	Provider     string
 	CodexVersion string // only used when Provider == "codex"
 	OpenclawBin  string // only used when Provider == "openclaw"; empty = PATH lookup
@@ -342,7 +363,10 @@ func Reuse(params ReuseParams, logger *slog.Logger) *Environment {
 		return nil
 	}
 
-	rootDir := filepath.Dir(params.WorkDir)
+	rootDir := params.RootDir
+	if rootDir == "" {
+		rootDir = filepath.Dir(params.WorkDir)
+	}
 	if params.LocalDirectory {
 		// For local_directory tasks the user's WorkDir is unrelated to
 		// envRoot (envRoot still lives under workspacesRoot/{wsID}/...),

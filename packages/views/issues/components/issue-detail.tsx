@@ -61,7 +61,7 @@ import { ResolvedThreadBar } from "./resolved-thread-bar";
 import { collectThreadReplies, deriveThreadResolution } from "./thread-utils";
 import { IssueAgentHeaderChip } from "./issue-agent-header-chip";
 import { ExecutionLogSection } from "./execution-log-section";
-import { RunScriptsSection, WorktreeSidebarLayout } from "@multica/worktrees-addon";
+import { IssueFileTabsProvider, IssueSidebarTabs, OpenInMenu, RunScriptsSection, WorktreeFileTabs, WorktreeSidebarLayout } from "@multica/worktrees-addon";
 import { PullRequestList } from "./pull-request-list";
 import { useGitHubSettings } from "@multica/core/github";
 import { useQuery } from "@tanstack/react-query";
@@ -1857,6 +1857,9 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
                 <TooltipContent side="bottom">{t(($) => $.detail.archive_tooltip)}</TooltipContent>
               </Tooltip>
             )}
+            {/* Worktrees add-on: open the issue's working directory in a local
+                app (Finder, editor, terminal). Self-hides until checked out. */}
+            <OpenInMenu issueId={id} />
             <Tooltip>
               <TooltipTrigger
                 render={
@@ -1903,6 +1906,10 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
           }
         />
 
+        {/* Worktrees add-on: tab strip under the header — pinned "Issue" tab
+            (the conversation below) + closable file tabs opened from the
+            Project tree. Renders children untouched until a workspace exists. */}
+        <WorktreeFileTabs issueId={id}>
         <div
           ref={setScrollContainerEl}
           data-tab-scroll-root
@@ -2237,48 +2244,55 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
           </div>
         </div>
         </div>
+        </WorktreeFileTabs>
       </div>
   );
 
+  // IssueFileTabsProvider sits above BOTH panels so the Project tree (sidebar)
+  // can open file tabs in the content strip across the resizable split.
   if (isMobile) {
     return (
-      <div className="flex flex-1 min-h-0">
-        {detailContent}
-        <Sheet open={mobileSidebarOpen} onOpenChange={setMobileSidebarOpen}>
-          <SheetContent side="right" showCloseButton={false} className="w-[320px] overflow-y-auto p-4">
-            <WorktreeSidebarLayout issueId={id} stacked>
-              {sidebarContent}
-            </WorktreeSidebarLayout>
-          </SheetContent>
-        </Sheet>
-      </div>
+      <IssueFileTabsProvider issueId={id}>
+        <div className="flex flex-1 min-h-0">
+          {detailContent}
+          <Sheet open={mobileSidebarOpen} onOpenChange={setMobileSidebarOpen}>
+            <SheetContent side="right" showCloseButton={false} className="w-[320px] overflow-y-auto p-4">
+              <WorktreeSidebarLayout issueId={id} stacked>
+                <IssueSidebarTabs issueId={id}>{sidebarContent}</IssueSidebarTabs>
+              </WorktreeSidebarLayout>
+            </SheetContent>
+          </Sheet>
+        </div>
+      </IssueFileTabsProvider>
     );
   }
 
   return (
-    <ResizablePanelGroup orientation="horizontal" className="flex-1 min-h-0" defaultLayout={defaultLayout} onLayoutChanged={onLayoutChanged}>
-      <ResizablePanel id="content" minSize="50%">
-        {detailContent}
-      </ResizablePanel>
-      <ResizableHandle />
-      <ResizablePanel
-        id="sidebar"
-        {...rightSidebarPanelMotionProps}
-        data-right-sidebar-motion={desktopSidebarMotionEnabled ? "enabled" : undefined}
-        defaultSize={desktopSidebarOpen ? 320 : 0}
-        minSize={260}
-        maxSize={420}
-        collapsible
-        groupResizeBehavior="preserve-pixel-size"
-        panelRef={sidebarRef}
-        onResize={handleDesktopSidebarResize}
-      >
-        <WorktreeSidebarLayout issueId={id}>
-          <AnimatedRightSidebar open={desktopSidebarVisualOpen} motionEnabled={desktopSidebarMotionEnabled}>
-            {sidebarContent}
-          </AnimatedRightSidebar>
-        </WorktreeSidebarLayout>
-      </ResizablePanel>
-    </ResizablePanelGroup>
+    <IssueFileTabsProvider issueId={id}>
+      <ResizablePanelGroup orientation="horizontal" className="flex-1 min-h-0" defaultLayout={defaultLayout} onLayoutChanged={onLayoutChanged}>
+        <ResizablePanel id="content" minSize="50%">
+          {detailContent}
+        </ResizablePanel>
+        <ResizableHandle />
+        <ResizablePanel
+          id="sidebar"
+          {...rightSidebarPanelMotionProps}
+          data-right-sidebar-motion={desktopSidebarMotionEnabled ? "enabled" : undefined}
+          defaultSize={desktopSidebarOpen ? 320 : 0}
+          minSize={260}
+          maxSize={420}
+          collapsible
+          groupResizeBehavior="preserve-pixel-size"
+          panelRef={sidebarRef}
+          onResize={handleDesktopSidebarResize}
+        >
+          <WorktreeSidebarLayout issueId={id}>
+            <AnimatedRightSidebar open={desktopSidebarVisualOpen} motionEnabled={desktopSidebarMotionEnabled}>
+              <IssueSidebarTabs issueId={id}>{sidebarContent}</IssueSidebarTabs>
+            </AnimatedRightSidebar>
+          </WorktreeSidebarLayout>
+        </ResizablePanel>
+      </ResizablePanelGroup>
+    </IssueFileTabsProvider>
   );
 }

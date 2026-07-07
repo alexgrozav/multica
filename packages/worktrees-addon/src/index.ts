@@ -1,17 +1,25 @@
 export { RunScriptsSection } from "./run-scripts-section";
 export { WorktreeSidebarLayout } from "./worktree-sidebar-layout";
-export { WorktreeScriptsTab } from "./worktree-scripts-tab";
-export { useWorktreeRealtime } from "./use-worktree-realtime";
+export { OpenInMenu } from "./open-in-menu";
+export { IssueSidebarTabs } from "./issue-sidebar-tabs";
+export { ProjectTree } from "./project-tree";
+export { ChangesList } from "./changes-list";
+export { IssueFileTabsProvider, useIssueFileTabs } from "./issue-file-tabs-context";
+export { WorktreeFileTabs } from "./worktree-file-tabs";
+export { useWorktreeRealtime, useWorktreeFilesRealtime } from "./use-worktree-realtime";
 export {
   worktreeKeys,
   issueWorktreesOptions,
+  issueWorktreeFilesOptions,
+  issueWorktreeChangesOptions,
   useIssueWorktrees,
+  useIssueWorktreeFiles,
+  useIssueWorktreeChanges,
   useWorktreeRunLog,
   useRunWorktreeSetup,
   useRunWorktreeScript,
   useStopWorktreeScript,
-  useWorktreeConfig,
-  useSaveWorktreeConfig,
+  useOpenIssueWorktree,
 } from "./queries";
 export { mergeBySeq } from "./merge";
 export * from "./types";

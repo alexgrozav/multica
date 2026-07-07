@@ -9,13 +9,14 @@ import (
 
 // Module is the server half of the worktrees add-on.
 type Module struct {
-	deps  Deps
-	store *Store
+	deps    Deps
+	store   *Store
+	fileOps *fileOpRegistry
 }
 
 // New constructs the module over the supplied ports.
 func New(deps Deps) *Module {
-	return &Module{deps: deps, store: NewStore(deps.Pool)}
+	return &Module{deps: deps, store: NewStore(deps.Pool), fileOps: newFileOpRegistry()}
 }
 
 // Store exposes the data layer (used by tests and the adapter if needed).
@@ -27,8 +28,8 @@ func (m *Module) Register(ctx context.Context) error {
 	if err := EnsureSchema(ctx, m.deps.Pool); err != nil {
 		return err
 	}
-	m.deps.Subscribe("issue:created", m.onIssueCreated)
-	m.deps.Subscribe("issue:updated", m.onIssueUpdated)
+	m.deps.Subscribe("issue:created", m.onIssueEvent)
+	m.deps.Subscribe("issue:updated", m.onIssueEvent)
 	return nil
 }
 
@@ -36,30 +37,39 @@ func (m *Module) bgCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), 15*time.Second)
 }
 
-// onIssueCreated initializes a worktree per workspace repo when auto-init is on.
-func (m *Module) onIssueCreated(ev IssueEvent) {
+// onIssueEvent drives the whole lifecycle off issue events (create + update):
+//   - assignment to an agent/squad in a workable status → check out one
+//     workspace (a worktree per repo, branched on the issue identifier).
+//   - close (done/cancelled) → queue cleanup (script + worktree removal).
+//
+// Both paths are idempotent, so re-firing on an unrelated edit is harmless — it
+// simply self-heals a missing workspace for an assigned, active issue.
+func (m *Module) onIssueEvent(ev IssueEvent) {
+	if ev.IssueID == "" || ev.WorkspaceID == "" {
+		return
+	}
+	// Close takes precedence: a done/cancelled issue is never (re)checked out.
+	if ev.StatusChanged && isTerminal(ev.Status) && !isTerminal(ev.PrevStatus) {
+		m.cleanup(ev)
+		return
+	}
+	if ev.shouldCheckout() {
+		m.checkout(ev)
+	}
+}
+
+// checkout creates one pending worktree row per workspace repo (idempotent). The
+// daemon's poll loop claims them and does the actual git checkout + setup.
+func (m *Module) checkout(ev IssueEvent) {
 	ctx, cancel := m.bgCtx()
 	defer cancel()
-
-	auto, err := m.store.AutoInit(ctx, ev.WorkspaceID)
-	if err != nil {
-		m.deps.log().Error("worktrees: read auto_init failed", "error", err, "workspace_id", ev.WorkspaceID)
-		return
-	}
-	if !auto {
-		return
-	}
-	// NOTE: we intentionally create the persistent worktree for ALL issues,
-	// including agent/squad-assigned ones. It powers the issue sidebar's
-	// Run/Cleanup/Setup tabs and is independent of the agent's OWN workdir
-	// (which runTask prepares separately via eagerCheckoutTaskRepos).
 	urls, err := m.store.WorkspaceRepoURLs(ctx, ev.WorkspaceID)
 	if err != nil {
 		m.deps.log().Error("worktrees: read workspace repos failed", "error", err, "workspace_id", ev.WorkspaceID)
 		return
 	}
 	for _, url := range urls {
-		w, err := m.store.CreateWorktreeRow(ctx, ev.IssueID, ev.WorkspaceID, url)
+		w, err := m.store.CreateWorktreeRow(ctx, ev.IssueID, ev.Identifier, ev.WorkspaceID, url)
 		if err != nil {
 			m.deps.log().Error("worktrees: create row failed", "error", err, "issue_id", ev.IssueID, "repo", url)
 			continue
@@ -68,14 +78,11 @@ func (m *Module) onIssueCreated(ev IssueEvent) {
 	}
 }
 
-// onIssueUpdated queues cleanup when an issue transitions into "done".
-func (m *Module) onIssueUpdated(ev IssueEvent) {
-	if !(ev.StatusChanged && ev.PrevStatus != "done" && ev.Status == "done") {
-		return
-	}
+// cleanup queues the cleanup script + worktree removal for every worktree of a
+// closed issue.
+func (m *Module) cleanup(ev IssueEvent) {
 	ctx, cancel := m.bgCtx()
 	defer cancel()
-
 	wts, err := m.store.MarkCleanupForIssue(ctx, ev.IssueID)
 	if err != nil {
 		m.deps.log().Error("worktrees: mark cleanup failed", "error", err, "issue_id", ev.IssueID)

@@ -28,12 +28,12 @@ interface WorktreeTabsContextValue {
   worktrees: IssueWorktree[];
   activeKey: string | null;
   setActive: (key: string) => void;
-  // Open (or focus) the Setup / Run log tab for a worktree. Does not run anything.
+  // Open (or focus) the Setup / named-Run log tab for a worktree. Does not run anything.
   openSetup: (worktreeId: string) => void;
-  openRun: (worktreeId: string) => void;
-  // Close a tab. Closing a Run tab stops the process if it is still running;
+  openRun: (worktreeId: string, name: string) => void;
+  // Close a tab. Closing a Run tab stops that named run if it is still running;
   // closing a Setup tab only hides the logs (re-openable from the scripts list).
-  closeTab: (worktreeId: string, kind: TabKind) => void;
+  closeTab: (worktreeId: string, kind: TabKind, name?: string) => void;
 }
 
 // No-op default so consumers (e.g. RunScriptsSection) never throw when rendered
@@ -70,7 +70,7 @@ export function WorktreeTabsProvider({
 
   const [openTabs, setOpenTabs] = useState<OpenTab[]>([]);
   const [activeKey, setActiveKey] = useState<string | null>(null);
-  // Setup tabs the user explicitly closed — suppresses auto-re-seeding them.
+  // Tabs the user explicitly closed — suppresses auto-re-seeding Setup tabs.
   const closedRef = useRef<Set<string>>(new Set());
 
   // Auto-seed a Setup tab per repo + prune tabs for removed worktrees whenever
@@ -93,24 +93,25 @@ export function WorktreeTabsProvider({
     setActiveKey(key);
   }, []);
 
-  const openRun = useCallback((worktreeId: string) => {
-    const key = tabKey(worktreeId, "run");
+  const openRun = useCallback((worktreeId: string, name: string) => {
+    const key = tabKey(worktreeId, "run", name);
     closedRef.current.delete(key);
-    setOpenTabs((prev) => addTab(prev, worktreeId, "run"));
+    setOpenTabs((prev) => addTab(prev, worktreeId, "run", name));
     setActiveKey(key);
   }, []);
 
   const stopMutate = stop.mutate;
   const closeTab = useCallback(
-    (worktreeId: string, kind: TabKind) => {
-      closedRef.current.add(tabKey(worktreeId, kind));
-      if (kind === "run") {
+    (worktreeId: string, kind: TabKind, name?: string) => {
+      closedRef.current.add(tabKey(worktreeId, kind, name));
+      if (kind === "run" && name) {
         // Only stop a run that's actually still running — RequestStop no-ops
         // otherwise, but skipping the call avoids a needless round-trip.
         const wt = worktrees.find((w) => w.id === worktreeId);
-        if (wt?.run_status === "running") stopMutate(worktreeId);
+        const run = wt?.runs.find((r) => r.name === name);
+        if (run?.status === "running") stopMutate({ worktreeId, name });
       }
-      setOpenTabs((prev) => removeTab(prev, worktreeId, kind));
+      setOpenTabs((prev) => removeTab(prev, worktreeId, kind, name));
     },
     [worktrees, stopMutate],
   );

@@ -1,7 +1,10 @@
 "use client";
 
 import { cn } from "@multica/ui/lib/utils";
-import { SidebarTrigger, useSidebarSafe } from "@multica/ui/components/ui/sidebar";
+import {
+  SidebarTrigger,
+  useSidebarSafe,
+} from "@multica/ui/components/ui/sidebar";
 
 function MobileSidebarTrigger() {
   const sidebar = useSidebarSafe();
@@ -16,7 +19,9 @@ interface PageHeaderProps {
 
 export function PageHeader({ children, className }: PageHeaderProps) {
   return (
-    <div className={cn("flex h-12 shrink-0 items-center border-b px-4", className)}>
+    <div
+      className={cn("flex h-12 shrink-0 items-center border-b px-4", className)}
+    >
       <MobileSidebarTrigger />
       {children}
     </div>

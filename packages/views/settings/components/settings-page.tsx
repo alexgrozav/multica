@@ -11,7 +11,6 @@ import {
   FlaskConical,
   Bell,
   Plug,
-  TerminalSquare,
 } from "lucide-react";
 import { GitHubMark } from "./github-mark";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@multica/ui/components/ui/tabs";
@@ -27,7 +26,6 @@ import { GitHubTab } from "./github-tab";
 import { IntegrationsTab } from "./integrations-tab";
 import { LabsTab } from "./labs-tab";
 import { NotificationsTab } from "./notifications-tab";
-import { WorktreeScriptsTab } from "@multica/worktrees-addon";
 import { useT } from "../../i18n";
 
 const ACCOUNT_TAB_KEYS = ["profile", "preferences", "notifications", "tokens"] as const;
@@ -99,7 +97,6 @@ export function SettingsPage({ extraAccountTabs }: SettingsPageProps = {}) {
       new Set<string>([
         ...ACCOUNT_TAB_KEYS,
         ...Object.values(WORKSPACE_TAB_VALUES),
-        "worktrees", // worktrees add-on tab
         ...(extraAccountTabs?.map((tab) => tab.value) ?? []),
       ]),
     [extraAccountTabs],
@@ -164,14 +161,6 @@ export function SettingsPage({ extraAccountTabs }: SettingsPageProps = {}) {
               </TabsTrigger>
             );
           })}
-          {/* worktrees add-on: hardcoded label keeps the add-on patch isolated
-              from locale files; scope the i18n literal rule off just here. */}
-          {/* eslint-disable i18next/no-literal-string */}
-          <TabsTrigger value="worktrees">
-            <TerminalSquare className="h-4 w-4" />
-            Worktrees
-          </TabsTrigger>
-          {/* eslint-enable i18next/no-literal-string */}
         </TabsList>
       </div>
 
@@ -188,7 +177,6 @@ export function SettingsPage({ extraAccountTabs }: SettingsPageProps = {}) {
           <TabsContent value="integrations"><IntegrationsTab /></TabsContent>
           <TabsContent value="labs"><LabsTab /></TabsContent>
           <TabsContent value="members"><MembersTab /></TabsContent>
-          <TabsContent value="worktrees"><WorktreeScriptsTab /></TabsContent>
           {extraAccountTabs?.map((tab) => (
             <TabsContent key={tab.value} value={tab.value}>{tab.content}</TabsContent>
           ))}

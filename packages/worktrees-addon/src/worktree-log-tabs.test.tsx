@@ -27,17 +27,17 @@ function makeWorktree(over: Partial<IssueWorktree> = {}): IssueWorktree {
   return {
     id: "w1",
     issue_id: "i1",
+    identifier: "PRO-11",
     workspace_id: "ws1",
     repo_url: "https://example.com/repoA.git",
     path: "/wt/a",
-    branch: "issue/x/a",
+    branch: "PRO-11",
     status: "ready",
     setup_status: "succeeded",
-    run_status: "idle",
     setup_task_id: "setup-1",
-    run_task_id: undefined,
-    has_run_script: true,
-    has_setup_script: true,
+    has_setup: true,
+    has_cleanup: true,
+    runs: [{ name: "dev", status: "idle" }],
     created_at: "",
     updated_at: "",
     ...over,
@@ -72,39 +72,35 @@ describe("WorktreeLogTabs + RunScriptsSection integration", () => {
     logLines = { "setup-1": [{ run_task_id: "setup-1", issue_id: "i1", worktree_id: "w1", seq: 1, stream: "stdout", content: "booting setup" }] };
     renderPanel();
 
-    // The default Setup tab is present (labelled with the repo + "setup")...
     expect(screen.getByRole("tab", { name: /repoA\s*setup/i })).toBeInTheDocument();
-    // ...and its panel shows the streamed setup log line.
     expect(screen.getByText("booting setup")).toBeInTheDocument();
   });
 
-  it("opens a Run tab (and runs the script) when Run is clicked in the list", () => {
+  it("opens a named Run tab (and runs that script) when Run is clicked in the list", () => {
     worktrees = [makeWorktree()];
     renderPanel();
 
-    // No run tab yet.
-    expect(screen.queryByRole("tab", { name: /repoA\s*run/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: /repoA\s*dev/i })).not.toBeInTheDocument();
 
-    // The list's Run action button runs the script and opens its tab.
+    // The list's Run action button runs the named script and opens its tab.
     fireEvent.click(screen.getByRole("button", { name: "Run" }));
-    expect(runMutate).toHaveBeenCalledWith("w1");
-    expect(screen.getByRole("tab", { name: /repoA\s*run/i })).toBeInTheDocument();
+    expect(runMutate).toHaveBeenCalledWith({ worktreeId: "w1", name: "dev" });
+    expect(screen.getByRole("tab", { name: /repoA\s*dev/i })).toBeInTheDocument();
   });
 
-  it("closing a running Run tab stops the process and removes the tab", () => {
-    worktrees = [makeWorktree({ run_status: "running", run_task_id: "run-1" })];
+  it("closing a running Run tab stops that named run and removes the tab", () => {
+    worktrees = [makeWorktree({ runs: [{ name: "dev", status: "running", run_task_id: "run-1" }] })];
     renderPanel();
 
-    // Open the run tab via its label (the action button shows Stop while running,
-    // but the "Open run logs" label still opens the log tab).
-    fireEvent.click(screen.getByRole("button", { name: "Open run logs" }));
-    const runTab = screen.getByRole("tab", { name: /repoA\s*run/i });
+    // Open the run tab via its label (the action shows Stop while running, but
+    // the "Open dev logs" label still opens the log tab).
+    fireEvent.click(screen.getByRole("button", { name: "Open dev logs" }));
+    const runTab = screen.getByRole("tab", { name: /repoA\s*dev/i });
     expect(runTab).toBeInTheDocument();
 
-    // Closing the run tab calls stop and drops the tab.
     fireEvent.click(within(runTab).getByLabelText("Close tab"));
-    expect(stopMutate).toHaveBeenCalledWith("w1");
-    expect(screen.queryByRole("tab", { name: /repoA\s*run/i })).not.toBeInTheDocument();
+    expect(stopMutate).toHaveBeenCalledWith({ worktreeId: "w1", name: "dev" });
+    expect(screen.queryByRole("tab", { name: /repoA\s*dev/i })).not.toBeInTheDocument();
   });
 
   it("closing a Setup tab does NOT stop anything and can be reopened from the list", () => {
@@ -116,7 +112,6 @@ describe("WorktreeLogTabs + RunScriptsSection integration", () => {
     expect(stopMutate).not.toHaveBeenCalled();
     expect(screen.queryByRole("tab", { name: /repoA\s*setup/i })).not.toBeInTheDocument();
 
-    // Clicking the "Setup" label in the list reopens the tab without re-running.
     fireEvent.click(screen.getByRole("button", { name: "Open setup logs" }));
     expect(setupMutate).not.toHaveBeenCalled();
     expect(screen.getByRole("tab", { name: /repoA\s*setup/i })).toBeInTheDocument();
@@ -130,7 +125,6 @@ describe("WorktreeLogTabs + RunScriptsSection integration", () => {
       </WorktreeSidebarLayout>,
     );
     expect(screen.getByTestId("sidebar-body")).toBeInTheDocument();
-    // No tab UI mounted.
     expect(container.querySelector('[role="tab"]')).toBeNull();
   });
 });

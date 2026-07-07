@@ -6,8 +6,12 @@ import { useWS } from "@multica/core/realtime";
 import { worktreeKeys } from "./queries";
 import { mergeBySeq } from "./merge";
 import {
+  WORKTREE_CHANGES_EVENT,
+  WORKTREE_FILES_EVENT,
   WORKTREE_RUN_LOG_EVENT,
   WORKTREE_UPDATED_EVENT,
+  type WorktreeChangesUpdatedEvent,
+  type WorktreeFilesUpdatedEvent,
   type WorktreeRunLog,
   type WorktreeUpdatedEvent,
 } from "./types";
@@ -41,6 +45,50 @@ export function useWorktreeRealtime(issueId: string) {
 
     return () => {
       unsubLog();
+      unsubUpdated();
+    };
+  }, [qc, subscribe, issueId]);
+}
+
+// Keeps the issue's worktree list + per-repo file lists + git status fresh for
+// the sidebar tabs. Mounted by IssueSidebarTabs, so it works even when the
+// log/tabs provider isn't mounted (issue without worktrees yet): a checkout
+// appearing, a file-list change, and a cleanup all reach the Project and
+// Changes tabs promptly. Invalidation is cheap — inactive queries just go
+// stale; only mounted viewers actually refetch.
+export function useWorktreeFilesRealtime(issueId: string) {
+  const qc = useQueryClient();
+  const { subscribe } = useWS();
+
+  useEffect(() => {
+    const unsubFiles = subscribe(WORKTREE_FILES_EVENT as WSEvent, (payload) => {
+      const p = payload as WorktreeFilesUpdatedEvent;
+      if (!p || p.issue_id !== issueId) return;
+      qc.invalidateQueries({ queryKey: worktreeKeys.files(issueId) });
+    });
+
+    const unsubChanges = subscribe(WORKTREE_CHANGES_EVENT as WSEvent, (payload) => {
+      const p = payload as WorktreeChangesUpdatedEvent;
+      if (!p || p.issue_id !== issueId) return;
+      qc.invalidateQueries({ queryKey: worktreeKeys.changes(issueId) });
+      // Any open diff of that worktree refetches too — its file may be what
+      // changed (mounted tabs only; closed diffs just go stale).
+      if (p.worktree_id) {
+        qc.invalidateQueries({ queryKey: worktreeKeys.diffs(p.worktree_id) });
+      }
+    });
+
+    const unsubUpdated = subscribe(WORKTREE_UPDATED_EVENT as WSEvent, (payload) => {
+      const p = payload as WorktreeUpdatedEvent;
+      if (!p || p.issue_id !== issueId) return;
+      qc.invalidateQueries({ queryKey: worktreeKeys.list(issueId) });
+      qc.invalidateQueries({ queryKey: worktreeKeys.files(issueId) });
+      qc.invalidateQueries({ queryKey: worktreeKeys.changes(issueId) });
+    });
+
+    return () => {
+      unsubFiles();
+      unsubChanges();
       unsubUpdated();
     };
   }, [qc, subscribe, issueId]);

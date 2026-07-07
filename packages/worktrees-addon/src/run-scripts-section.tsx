@@ -20,14 +20,17 @@ import {
   useStopWorktreeScript,
 } from "./queries";
 import { useWorktreeTabs } from "./worktree-tabs-context";
-import type { IssueWorktree } from "./types";
+import type { IssueWorktree, WorktreeRunScript } from "./types";
 
 interface RunScriptsSectionProps {
   issueId: string;
 }
 
 function repoLabel(url: string): string {
-  let u = url.trim().replace(/\/$/, "").replace(/\.git$/, "");
+  let u = url
+    .trim()
+    .replace(/\/$/, "")
+    .replace(/\.git$/, "");
   const i = Math.max(u.lastIndexOf("/"), u.lastIndexOf(":"));
   if (i >= 0) u = u.slice(i + 1);
   return u || url;
@@ -37,7 +40,8 @@ function StatusPill({ status }: { status: string }) {
   let tone = "text-muted-foreground";
   if (status === "ready") tone = "text-success";
   else if (status === "error") tone = "text-destructive";
-  else if (status === "pending" || status === "initializing") tone = "text-warning";
+  else if (status === "pending" || status === "initializing")
+    tone = "text-warning";
   return <span className={`shrink-0 text-[11px] ${tone}`}>{status}</span>;
 }
 
@@ -74,33 +78,103 @@ function ScriptStatus({ status, busy }: { status: string; busy: boolean }) {
   }
 }
 
-// One repo worktree: overall status, then Setup + Run as peer script lines (each
-// with its own status + control). Logs are no longer shown inline here — clicking
-// a script label opens its tab in the bottom log viewer; running a script opens
-// (and focuses) that tab too.
-function WorktreeRow({ worktree, issueId }: { worktree: IssueWorktree; issueId: string }) {
-  const setup = useRunWorktreeSetup(issueId);
-  const run = useRunWorktreeScript(issueId);
-  const stop = useStopWorktreeScript(issueId);
-  const { openSetup, openRun } = useWorktreeTabs();
+// One named run script line: status + Run/Stop control. Clicking the label opens
+// its log tab; running/stopping opens (and focuses) it too.
+function RunLine({
+  run,
+  worktree,
+  issueId,
+  disabled,
+}: {
+  run: WorktreeRunScript;
+  worktree: IssueWorktree;
+  issueId: string;
+  disabled: boolean;
+}) {
+  const runMut = useRunWorktreeScript(issueId);
+  const stopMut = useStopWorktreeScript(issueId);
+  const { openRun } = useWorktreeTabs();
+  const isRunning = run.status === "running";
 
-  const isRunning = worktree.run_status === "running";
+  return (
+    <div className="mt-1 flex items-center gap-2 pl-1">
+      <button
+        type="button"
+        aria-label={`Open ${run.name} logs`}
+        onClick={() => openRun(worktree.id, run.name)}
+        className="min-w-10 shrink-0 text-left font-mono text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+      >
+        {run.name}
+      </button>
+      <ScriptStatus status={run.status} busy={isRunning} />
+      {isRunning ? (
+        <Button
+          variant="ghost"
+          size="sm"
+          aria-label="Stop"
+          className="ml-auto h-6 px-2 text-destructive hover:text-destructive"
+          onClick={() =>
+            stopMut.mutate({ worktreeId: worktree.id, name: run.name })
+          }
+        >
+          <Square className="h-3 w-3" />
+        </Button>
+      ) : (
+        <Button
+          variant="ghost"
+          size="sm"
+          aria-label="Run"
+          className="ml-auto h-6 px-2"
+          disabled={disabled}
+          onClick={() => {
+            runMut.mutate({ worktreeId: worktree.id, name: run.name });
+            openRun(worktree.id, run.name);
+          }}
+        >
+          <Play className="h-3 w-3" />
+        </Button>
+      )}
+    </div>
+  );
+}
+
+// One repo worktree: overall status, then Setup + each named Run script as peer
+// lines (each with its own status + control). Logs live in the bottom log viewer,
+// opened from the controls here.
+function WorktreeRow({
+  worktree,
+  issueId,
+}: {
+  worktree: IssueWorktree;
+  issueId: string;
+}) {
+  const setup = useRunWorktreeSetup(issueId);
+  const { openSetup } = useWorktreeTabs();
+
   const isSettingUp = worktree.setup_status === "running";
-  const busy = isRunning || isSettingUp;
+  const anyRunActive = worktree.runs.some((r) => r.status === "running");
   const ready = worktree.status === "ready" || worktree.status === "error";
-  const canSetup = ready && worktree.has_setup_script && !busy;
-  const canRun = worktree.status === "ready" && worktree.has_run_script && !busy;
+  const canSetup = ready && worktree.has_setup && !isSettingUp && !anyRunActive;
+  const canRun = worktree.status === "ready" && !isSettingUp;
 
   return (
     <div className="rounded px-1 py-1.5">
       <div className="flex items-center gap-2">
-        <span className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground" title={worktree.repo_url}>
+        <span
+          className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground"
+          title={worktree.repo_url}
+        >
           {repoLabel(worktree.repo_url)}
         </span>
+        {worktree.identifier && (
+          <span className="shrink-0 font-mono text-[10px] text-muted-foreground/70">
+            {worktree.identifier}
+          </span>
+        )}
         <StatusPill status={worktree.status} />
       </div>
 
-      {worktree.has_setup_script && (
+      {worktree.has_setup && (
         <div className="mt-1 flex items-center gap-2 pl-1">
           <button
             type="button"
@@ -108,12 +182,16 @@ function WorktreeRow({ worktree, issueId }: { worktree: IssueWorktree; issueId: 
             onClick={() => openSetup(worktree.id)}
             className="w-10 shrink-0 text-left text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground"
           >
-            Setup
+            setup
           </button>
-          <ScriptStatus status={worktree.setup_status} busy={isSettingUp || setup.isPending} />
+          <ScriptStatus
+            status={worktree.setup_status}
+            busy={isSettingUp || setup.isPending}
+          />
           <Button
             variant="ghost"
             size="sm"
+            aria-label="Run setup"
             className="ml-auto h-6 px-2"
             disabled={!canSetup || setup.isPending}
             onClick={() => {
@@ -121,51 +199,24 @@ function WorktreeRow({ worktree, issueId }: { worktree: IssueWorktree; issueId: 
               openSetup(worktree.id);
             }}
           >
-            {isSettingUp || setup.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <RotateCcw className="h-3 w-3" />}
-            Re-run
+            {isSettingUp || setup.isPending ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <RotateCcw className="h-3 w-3" />
+            )}
           </Button>
         </div>
       )}
 
-      {worktree.has_run_script && (
-        <div className="mt-1 flex items-center gap-2 pl-1">
-          <button
-            type="button"
-            aria-label="Open run logs"
-            onClick={() => openRun(worktree.id)}
-            className="w-10 shrink-0 text-left text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground"
-          >
-            Run
-          </button>
-          <ScriptStatus status={worktree.run_status} busy={isRunning} />
-          {isRunning ? (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="ml-auto h-6 px-2 text-destructive hover:text-destructive"
-              disabled={stop.isPending}
-              onClick={() => stop.mutate(worktree.id)}
-            >
-              {stop.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Square className="h-3 w-3" />}
-              Stop
-            </Button>
-          ) : (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="ml-auto h-6 px-2"
-              disabled={!canRun || run.isPending}
-              onClick={() => {
-                run.mutate(worktree.id);
-                openRun(worktree.id);
-              }}
-            >
-              {run.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
-              Run
-            </Button>
-          )}
-        </div>
-      )}
+      {worktree.runs.map((run) => (
+        <RunLine
+          key={run.name}
+          run={run}
+          worktree={worktree}
+          issueId={issueId}
+          disabled={!canRun}
+        />
+      ))}
 
       {worktree.last_error && worktree.status === "error" && (
         <div className="mt-1 flex items-start gap-1 pl-1 text-[11px] text-destructive">
@@ -189,7 +240,9 @@ export function RunScriptsSection({ issueId }: RunScriptsSectionProps) {
   if (worktrees.length === 0) return null;
 
   const activeCount = worktrees.filter(
-    (w) => w.run_status === "running" || w.setup_status === "running",
+    (w) =>
+      w.setup_status === "running" ||
+      w.runs.some((r) => r.status === "running"),
   ).length;
 
   return (

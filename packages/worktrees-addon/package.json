@@ -12,8 +12,17 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "@codemirror/commands": "^6.8.1",
+    "@codemirror/language": "^6.11.0",
+    "@codemirror/language-data": "^6.5.1",
+    "@codemirror/merge": "^6.10.2",
+    "@codemirror/state": "^6.5.2",
+    "@codemirror/view": "^6.37.0",
+    "@lezer/highlight": "^1.2.1",
     "@multica/core": "workspace:*",
     "@multica/ui": "workspace:*",
+    "cmdk": "^1.1.1",
+    "codemirror": "^6.0.1",
     "sonner": "^2.0.7",
     "zod": "catalog:"
   },

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { api, parseWithFallback } from "@multica/core/api";
 import type {
+  IssueTerminal,
   IssueWorktree,
   WorktreeChanges,
   WorktreeFileContent,
@@ -201,6 +202,81 @@ export async function getWorktreeFileDiff(
     { worktree_id: worktreeId, path, old_content: "", new_content: "", truncated: false, binary: false },
     { endpoint: "GET /api/worktree/issues/{id}/{worktreeId}/diff" },
   );
+}
+
+const IssueTerminalSchema = z.object({
+  id: z.string(),
+  issue_id: z.string().default(""),
+  workspace_id: z.string().default(""),
+  index: z.number().default(0),
+  title: z.string().default(""),
+  status: z.string().default("pending"),
+  exit_code: z.number().optional(),
+  error: z.string().optional(),
+  created_at: z.string().default(""),
+});
+
+export async function listIssueTerminals(issueId: string): Promise<IssueTerminal[]> {
+  const raw = await api.fetch<unknown>(`/api/worktree/issues/${issueId}/terminals`);
+  return parseWithFallback(raw, z.array(IssueTerminalSchema), [] as IssueTerminal[], {
+    endpoint: "GET /api/worktree/issues/{id}/terminals",
+  });
+}
+
+// Opens a new terminal session on the issue's owning daemon. cols/rows size
+// the PTY at spawn. Non-2xx (no ready worktree / daemon offline / too many
+// terminals) throws so the caller can surface it.
+export async function createIssueTerminal(
+  issueId: string,
+  size: { cols: number; rows: number },
+): Promise<IssueTerminal> {
+  const raw = await api.fetch<unknown>(`/api/worktree/issues/${issueId}/terminals`, {
+    method: "POST",
+    body: JSON.stringify(size),
+  });
+  return parseWithFallback(
+    raw,
+    IssueTerminalSchema,
+    { id: "", issue_id: issueId, workspace_id: "", index: 0, title: "", status: "pending", created_at: "" },
+    { endpoint: "POST /api/worktree/issues/{id}/terminals" },
+  );
+}
+
+// Ends the terminal session (kills the shell) and removes its tab everywhere.
+export async function closeIssueTerminal(issueId: string, terminalId: string): Promise<void> {
+  await api.fetch<unknown>(`/api/worktree/issues/${issueId}/terminals/${terminalId}`, {
+    method: "DELETE",
+  });
+}
+
+const TerminalTicketSchema = z.object({ ticket: z.string().default("") });
+
+// Mints the one-time credential for the terminal's viewer WebSocket (browsers
+// cannot send auth headers on WS upgrades, so the socket authenticates with a
+// short-lived ticket obtained over the normal authed API).
+export async function createTerminalTicket(issueId: string, terminalId: string): Promise<string> {
+  const raw = await api.fetch<unknown>(
+    `/api/worktree/issues/${issueId}/terminals/${terminalId}/ticket`,
+    { method: "POST" },
+  );
+  const parsed = parseWithFallback(raw, TerminalTicketSchema, { ticket: "" }, {
+    endpoint: "POST /api/worktree/issues/{id}/terminals/{tid}/ticket",
+  });
+  if (!parsed.ticket) throw new Error("no terminal ticket issued");
+  return parsed.ticket;
+}
+
+// The viewer WebSocket URL for a terminal session. Derived from the API base
+// (absolute on desktop, possibly origin-relative on web).
+export function terminalSocketUrl(ticket: string): string {
+  const base = api.getBaseUrl();
+  const abs =
+    base && /^https?:\/\//.test(base)
+      ? base
+      : typeof window !== "undefined"
+        ? window.location.origin + base
+        : base;
+  return `${abs.replace(/^http/, "ws")}/ws/worktree-terminal?ticket=${encodeURIComponent(ticket)}`;
 }
 
 // Writes editor content back into the worktree file through the same relay.

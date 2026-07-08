@@ -27,6 +27,10 @@ func (m *Module) UIRouter() http.Handler {
 	r.Post("/issues/{issueId}/{worktreeId}/run", m.handleRun)
 	r.Post("/issues/{issueId}/{worktreeId}/run/stop", m.handleStop)
 	r.Post("/issues/{issueId}/open", m.handleOpen)
+	r.Get("/issues/{issueId}/terminals", m.handleListTerminals)
+	r.Post("/issues/{issueId}/terminals", m.handleCreateTerminal)
+	r.Delete("/issues/{issueId}/terminals/{terminalId}", m.handleCloseTerminal)
+	r.Post("/issues/{issueId}/terminals/{terminalId}/ticket", m.handleTerminalTicket)
 	return r
 }
 
@@ -42,6 +46,7 @@ func (m *Module) DaemonRouter() http.Handler {
 	r.Post("/worktrees/{worktreeId}/files", m.handleReportFiles)
 	r.Post("/worktrees/{worktreeId}/changes", m.handleReportChanges)
 	r.Post("/file-ops/{opId}/result", m.handleFileOpResult)
+	r.Get("/terminals/{terminalId}/ws", m.handleTerminalDaemonWS)
 	return r
 }
 
@@ -378,7 +383,8 @@ func (m *Module) handlePollJobs(w http.ResponseWriter, r *http.Request) {
 		targets = nil
 	}
 	fileOps := m.fileOps.claim(daemonID, wsID)
-	writeJSON(w, http.StatusOK, shared.JobsResponse{Jobs: jobs, FileScan: targets, FileOps: fileOps})
+	terminals := m.terminals.pendingFor(daemonID, wsID)
+	writeJSON(w, http.StatusOK, shared.JobsResponse{Jobs: jobs, FileScan: targets, FileOps: fileOps, Terminals: terminals})
 }
 
 // handleFileOpResult completes a pending file op with the daemon's result,
@@ -656,6 +662,8 @@ func writeWorktreeErr(w http.ResponseWriter, err error) {
 		writeErr(w, http.StatusConflict, "owning machine offline")
 	case errors.Is(err, ErrAlreadyRunning):
 		writeErr(w, http.StatusConflict, "run already in progress")
+	case errors.Is(err, ErrTooManyTerminals):
+		writeErr(w, http.StatusConflict, "too many open terminals")
 	default:
 		writeErr(w, http.StatusInternalServerError, "internal error")
 	}

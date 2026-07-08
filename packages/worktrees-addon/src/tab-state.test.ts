@@ -3,6 +3,7 @@ import {
   addTab,
   nextActiveKey,
   reconcileSetupTabs,
+  reconcileTerminalTabs,
   removeTab,
   tabKey,
   type OpenTab,
@@ -37,6 +38,43 @@ describe("reconcileSetupTabs", () => {
     ];
     const next = reconcileSetupTabs(prev, [wt("a")], new Set());
     expect(next.map((t) => tabKey(t.worktreeId, t.kind, t.name))).toEqual(["a:setup:"]);
+  });
+});
+
+describe("reconcileTerminalTabs", () => {
+  const term = (id: string) => ({ id });
+
+  it("auto-opens a tab per live session, after existing tabs", () => {
+    const prev: OpenTab[] = [{ worktreeId: "a", kind: "setup" }];
+    const next = reconcileTerminalTabs(prev, [term("t1"), term("t2")], new Set());
+    expect(next.map((t) => tabKey(t.worktreeId, t.kind, t.name))).toEqual([
+      "a:setup:",
+      ":terminal:t1",
+      ":terminal:t2",
+    ]);
+  });
+
+  it("does not re-open a terminal tab the user just closed", () => {
+    const next = reconcileTerminalTabs([], [term("t1")], new Set([":terminal:t1"]));
+    expect(next).toEqual([]);
+  });
+
+  it("prunes tabs whose session vanished, leaving other kinds alone", () => {
+    const prev: OpenTab[] = [
+      { worktreeId: "a", kind: "run", name: "dev" },
+      { worktreeId: "", kind: "terminal", name: "gone" },
+      { worktreeId: "", kind: "terminal", name: "t1" },
+    ];
+    const next = reconcileTerminalTabs(prev, [term("t1")], new Set());
+    expect(next.map((t) => tabKey(t.worktreeId, t.kind, t.name))).toEqual([
+      "a:run:dev",
+      ":terminal:t1",
+    ]);
+  });
+
+  it("returns the same reference when nothing changed", () => {
+    const prev: OpenTab[] = [{ worktreeId: "", kind: "terminal", name: "t1" }];
+    expect(reconcileTerminalTabs(prev, [term("t1")], new Set())).toBe(prev);
   });
 });
 

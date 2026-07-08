@@ -123,8 +123,45 @@ export interface WorktreeFileDiff {
   binary: boolean;
 }
 
+// One interactive terminal session in the issue's checked-out workspace.
+// Ephemeral relay state: it lives in server memory + a daemon PTY, and dies
+// with either process. index is the per-issue tab ordinal ("Terminal 2");
+// title is the shell's current foreground process ("make"), "" at the prompt.
+export interface IssueTerminal {
+  id: string;
+  issue_id: string;
+  workspace_id: string;
+  index: number;
+  title: string;
+  status: string; // pending | open | exited
+  exit_code?: number;
+  error?: string;
+  created_at: string;
+}
+
+// worktree_terminal:updated WS payload — the session snapshot after any
+// lifecycle change. removed marks a session that is gone entirely.
+export interface WorktreeTerminalEvent {
+  issue_id: string;
+  terminal: IssueTerminal;
+  removed?: boolean;
+}
+
+// JSON control frame on the terminal WebSocket (text frames; binary frames are
+// raw PTY bytes). Mirrors shared.TermCtl.
+export interface TerminalCtl {
+  type: string; // resize | title | exit | state
+  cols?: number;
+  rows?: number;
+  title?: string;
+  status?: string;
+  exit_code?: number;
+  error?: string;
+}
+
 // WS event-type strings (must match server/addons/worktrees/shared).
 export const WORKTREE_RUN_LOG_EVENT = "worktree_run:log";
 export const WORKTREE_UPDATED_EVENT = "worktree:updated";
 export const WORKTREE_FILES_EVENT = "worktree_files:updated";
 export const WORKTREE_CHANGES_EVENT = "worktree_changes:updated";
+export const WORKTREE_TERMINAL_EVENT = "worktree_terminal:updated";

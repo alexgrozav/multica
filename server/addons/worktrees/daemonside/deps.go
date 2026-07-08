@@ -66,6 +66,7 @@ type Module struct {
 	httpC      *http.Client
 	mu         sync.Mutex
 	running    map[string]context.CancelFunc // runKey(worktreeID,name) -> cancel of the active Run
+	terms      map[string]termHandle         // terminal id -> live PTY session
 	locks      sync.Map                      // bare/cache path -> *sync.Mutex (fallback when WithRepoLock is nil)
 	reconciled sync.Map                      // workspaceID -> true once stale runs are reset (one-shot per process)
 	scanBusy   atomic.Bool                   // one file-scan pass at a time; a slow pass skips ticks, never piles up
@@ -82,6 +83,7 @@ func New(deps Deps) *Module {
 		httpC:   hc,
 		cl:      &client{baseURL: deps.ServerBaseURL, token: deps.TokenProvider, daemonID: deps.DaemonID, hc: hc},
 		running: map[string]context.CancelFunc{},
+		terms:   map[string]termHandle{},
 	}
 }
 

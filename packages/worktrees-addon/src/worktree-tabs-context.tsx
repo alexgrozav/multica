@@ -10,29 +10,37 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { useStopWorktreeScript } from "./queries";
+import { toast } from "sonner";
+import { useCloseTerminal, useCreateTerminal, useIssueTerminals, useStopWorktreeScript } from "./queries";
 import { useWorktreeRealtime } from "./use-worktree-realtime";
 import {
   addTab,
   nextActiveKey,
   reconcileSetupTabs,
+  reconcileTerminalTabs,
   removeTab,
   tabKey,
   type OpenTab,
   type TabKind,
 } from "./tab-state";
-import type { IssueWorktree } from "./types";
+import type { IssueTerminal, IssueWorktree } from "./types";
 
 interface WorktreeTabsContextValue {
+  issueId: string;
   openTabs: OpenTab[];
   worktrees: IssueWorktree[];
+  terminals: IssueTerminal[];
   activeKey: string | null;
   setActive: (key: string) => void;
   // Open (or focus) the Setup / named-Run log tab for a worktree. Does not run anything.
   openSetup: (worktreeId: string) => void;
   openRun: (worktreeId: string, name: string) => void;
+  // Open a NEW terminal session on the issue's owning daemon (the "+" button).
+  createTerminal: () => void;
+  creatingTerminal: boolean;
   // Close a tab. Closing a Run tab stops that named run if it is still running;
-  // closing a Setup tab only hides the logs (re-openable from the scripts list).
+  // closing a Setup tab only hides the logs (re-openable from the scripts list);
+  // closing a terminal tab ends the session (kills the shell).
   closeTab: (worktreeId: string, kind: TabKind, name?: string) => void;
 }
 
@@ -41,12 +49,16 @@ interface WorktreeTabsContextValue {
 // isn't mounted, and in unit tests that render the scripts list directly.
 const noop = () => {};
 const WorktreeTabsContext = createContext<WorktreeTabsContextValue>({
+  issueId: "",
   openTabs: [],
   worktrees: [],
+  terminals: [],
   activeKey: null,
   setActive: noop,
   openSetup: noop,
   openRun: noop,
+  createTerminal: noop,
+  creatingTerminal: false,
   closeTab: noop,
 });
 
@@ -63,14 +75,18 @@ export function WorktreeTabsProvider({
   worktrees: IssueWorktree[];
   children: ReactNode;
 }) {
-  // Stream run/setup log lines into the cache for the whole issue, regardless of
-  // which tab (if any) is currently mounted/visible.
+  // Stream run/setup log lines + terminal lifecycle events into the cache for
+  // the whole issue, regardless of which tab (if any) is currently mounted.
   useWorktreeRealtime(issueId);
   const stop = useStopWorktreeScript(issueId);
+  const { data: terminals = [] } = useIssueTerminals(issueId);
+  const createTerminalMutation = useCreateTerminal(issueId);
+  const closeTerminalMutation = useCloseTerminal(issueId);
 
   const [openTabs, setOpenTabs] = useState<OpenTab[]>([]);
   const [activeKey, setActiveKey] = useState<string | null>(null);
-  // Tabs the user explicitly closed — suppresses auto-re-seeding Setup tabs.
+  // Tabs the user explicitly closed — suppresses auto-re-seeding Setup tabs and
+  // re-opening a terminal tab in the gap before its removal event lands.
   const closedRef = useRef<Set<string>>(new Set());
 
   // Auto-seed a Setup tab per repo + prune tabs for removed worktrees whenever
@@ -78,6 +94,12 @@ export function WorktreeTabsProvider({
   useEffect(() => {
     setOpenTabs((prev) => reconcileSetupTabs(prev, worktrees, closedRef.current));
   }, [worktrees]);
+
+  // Mirror live terminal sessions into tabs: restore after reload, adopt
+  // sessions opened in another window, prune closed ones.
+  useEffect(() => {
+    setOpenTabs((prev) => reconcileTerminalTabs(prev, terminals, closedRef.current));
+  }, [terminals]);
 
   // Effective active key is derived (not synced via effect) so it is never stale
   // or null while tabs exist — avoids a controlled/uncontrolled flash on the
@@ -100,7 +122,28 @@ export function WorktreeTabsProvider({
     setActiveKey(key);
   }, []);
 
+  const createTerminalMutate = createTerminalMutation.mutate;
+  const createTerminal = useCallback(() => {
+    // The PTY spawns at a default size; the view's first resize frame corrects
+    // it as soon as the tab renders.
+    createTerminalMutate(
+      { cols: 80, rows: 24 },
+      {
+        onSuccess: (t) => {
+          const key = tabKey("", "terminal", t.id);
+          closedRef.current.delete(key);
+          setOpenTabs((prev) => addTab(prev, "", "terminal", t.id));
+          setActiveKey(key);
+        },
+        onError: (err) => {
+          toast.error(err instanceof Error ? err.message : "Could not open a terminal");
+        },
+      },
+    );
+  }, [createTerminalMutate]);
+
   const stopMutate = stop.mutate;
+  const closeTerminalMutate = closeTerminalMutation.mutate;
   const closeTab = useCallback(
     (worktreeId: string, kind: TabKind, name?: string) => {
       closedRef.current.add(tabKey(worktreeId, kind, name));
@@ -111,14 +154,43 @@ export function WorktreeTabsProvider({
         const run = wt?.runs.find((r) => r.name === name);
         if (run?.status === "running") stopMutate({ worktreeId, name });
       }
+      if (kind === "terminal" && name) {
+        // Closing the tab ends the session (kills the shell). Skip the call
+        // when the session is already gone (closed from another window).
+        if (terminals.some((t) => t.id === name)) closeTerminalMutate(name);
+      }
       setOpenTabs((prev) => removeTab(prev, worktreeId, kind, name));
     },
-    [worktrees, stopMutate],
+    [worktrees, terminals, stopMutate, closeTerminalMutate],
   );
 
   const value = useMemo<WorktreeTabsContextValue>(
-    () => ({ openTabs, worktrees, activeKey: effectiveActiveKey, setActive, openSetup, openRun, closeTab }),
-    [openTabs, worktrees, effectiveActiveKey, setActive, openSetup, openRun, closeTab],
+    () => ({
+      issueId,
+      openTabs,
+      worktrees,
+      terminals,
+      activeKey: effectiveActiveKey,
+      setActive,
+      openSetup,
+      openRun,
+      createTerminal,
+      creatingTerminal: createTerminalMutation.isPending,
+      closeTab,
+    }),
+    [
+      issueId,
+      openTabs,
+      worktrees,
+      terminals,
+      effectiveActiveKey,
+      setActive,
+      openSetup,
+      openRun,
+      createTerminal,
+      createTerminalMutation.isPending,
+      closeTab,
+    ],
   );
 
   return <WorktreeTabsContext.Provider value={value}>{children}</WorktreeTabsContext.Provider>;

@@ -17,10 +17,11 @@ const ManifestFile = "multica.json"
 // WebSocket event-type strings. These must match the strings the frontend
 // module (packages/worktrees-addon) subscribes to.
 const (
-	EventWorktreeUpdated = "worktree:updated"
-	EventWorktreeRunLog  = "worktree_run:log"
-	EventWorktreeFiles   = "worktree_files:updated"
-	EventWorktreeChanges = "worktree_changes:updated"
+	EventWorktreeUpdated  = "worktree:updated"
+	EventWorktreeRunLog   = "worktree_run:log"
+	EventWorktreeFiles    = "worktree_files:updated"
+	EventWorktreeChanges  = "worktree_changes:updated"
+	EventWorktreeTerminal = "worktree_terminal:updated"
 )
 
 // Worktree lifecycle status values (issue_worktree.status).
@@ -99,6 +100,24 @@ func ValidOpenTarget(t string) bool {
 const (
 	StreamStdout = "stdout"
 	StreamStderr = "stderr"
+)
+
+// Terminal session status values. Sessions are in-memory only (they die with
+// the server), so unlike worktree statuses these never touch the DB.
+const (
+	TermPending = "pending" // created, waiting for the owning daemon to dial back
+	TermOpen    = "open"    // daemon attached, shell running
+	TermExited  = "exited"  // shell exited / daemon lost; scrollback still viewable
+)
+
+// Terminal WS control-frame types. On every leg of the relay, BINARY frames
+// carry raw PTY bytes (viewer→daemon: keyboard input; daemon→viewer: output)
+// and TEXT frames carry one JSON-encoded TermCtl.
+const (
+	TermCtlResize = "resize" // viewer → daemon: the renderer was resized
+	TermCtlTitle  = "title"  // daemon → server: foreground process changed
+	TermCtlExit   = "exit"   // daemon → server: shell exited (code / error)
+	TermCtlState  = "state"  // server → viewer: session status snapshot
 )
 
 // File-op kinds: on-demand file content reads/writes relayed to the owning
@@ -241,10 +260,13 @@ type Job struct {
 // this daemon owns (with the server's current file-list digest), so the poll
 // loop can rescan them and report only real changes. FileOps are pending
 // on-demand file reads/writes whose UI callers are waiting on the result.
+// Terminals are pending terminal sessions the daemon should spawn a PTY for
+// and dial back on the terminal WS endpoint.
 type JobsResponse struct {
-	Jobs     []Job            `json:"jobs"`
-	FileScan []FileScanTarget `json:"file_scan,omitempty"`
-	FileOps  []FileOp         `json:"file_ops,omitempty"`
+	Jobs      []Job            `json:"jobs"`
+	FileScan  []FileScanTarget `json:"file_scan,omitempty"`
+	FileOps   []FileOp         `json:"file_ops,omitempty"`
+	Terminals []TerminalOpen   `json:"terminals,omitempty"`
 }
 
 // FileOp is one on-demand file content request, relayed to the owning daemon on
@@ -273,6 +295,72 @@ type FileOpResult struct {
 	Binary     bool   `json:"binary,omitempty"`
 	NotFound   bool   `json:"not_found,omitempty"`
 	Error      string `json:"error,omitempty"`
+}
+
+// Terminal is the API representation of one interactive terminal session in an
+// issue's checked-out workspace. Sessions are ephemeral relay state (in-memory
+// on the server, a PTY on the owning daemon) — a server restart ends them.
+type Terminal struct {
+	ID          string `json:"id"`
+	IssueID     string `json:"issue_id"`
+	WorkspaceID string `json:"workspace_id"`
+	// Index is the per-issue ordinal used for the tab label ("Terminal 2").
+	Index int `json:"index"`
+	// Title is the shell's current foreground process ("make"), or "" at the
+	// prompt.
+	Title     string `json:"title"`
+	Status    string `json:"status"` // pending|open|exited
+	ExitCode  *int   `json:"exit_code,omitempty"`
+	Error     string `json:"error,omitempty"`
+	CreatedAt string `json:"created_at"`
+}
+
+// TerminalOpen is one pending terminal session delivered to the owning daemon
+// on its poll: spawn a shell PTY in the issue's workspace dir and dial back the
+// terminal WS endpoint for this id. Ephemeral like FileOp — no DB row.
+type TerminalOpen struct {
+	ID          string `json:"id"`
+	IssueID     string `json:"issue_id"`
+	WorkspaceID string `json:"workspace_id"`
+	Identifier  string `json:"identifier,omitempty"` // human issue id (env/PS1 convenience)
+	Cols        int    `json:"cols"`
+	Rows        int    `json:"rows"`
+}
+
+// TermCtl is the JSON control frame exchanged as WS text messages on the
+// terminal relay (binary frames carry the raw PTY bytes). Which fields are set
+// depends on Type — see the TermCtl* constants.
+type TermCtl struct {
+	Type     string `json:"type"`
+	Cols     int    `json:"cols,omitempty"`
+	Rows     int    `json:"rows,omitempty"`
+	Title    string `json:"title,omitempty"`
+	Status   string `json:"status,omitempty"`
+	ExitCode *int   `json:"exit_code,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+// CreateTerminalRequest is the body of the create-terminal endpoint. Cols/Rows
+// size the PTY at spawn (the first resize control frame corrects any drift).
+type CreateTerminalRequest struct {
+	Cols int `json:"cols"`
+	Rows int `json:"rows"`
+}
+
+// TerminalTicket is the response of the WS-ticket endpoint: a one-time,
+// short-lived credential for the viewer WebSocket upgrade (browsers cannot set
+// auth headers on WS handshakes, and the desktop client has no cookie).
+type TerminalTicket struct {
+	Ticket string `json:"ticket"`
+}
+
+// TerminalEvent is the worktree_terminal:updated WS payload: the session
+// snapshot after any lifecycle change (created, opened, title, exited, closed).
+// Removed is true when the session is gone entirely (user closed it).
+type TerminalEvent struct {
+	IssueID  string   `json:"issue_id"`
+	Terminal Terminal `json:"terminal"`
+	Removed  bool     `json:"removed,omitempty"`
 }
 
 // FileContent is the UI response of the file read/write endpoints.

@@ -662,6 +662,13 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		realtime.HandleWebSocket(hub, mc, pr, slugResolver, w, r)
 	})
 
+	// worktrees add-on: interactive-terminal viewer socket. Outside the auth
+	// middleware like /ws (browsers cannot send auth headers on WS upgrades);
+	// authenticated by a one-time ticket minted over the member-authed API.
+	r.Get("/ws/worktree-terminal", func(w http.ResponseWriter, r *http.Request) {
+		worktreeAddon(pool, bus).HandleTerminalSocket(w, r)
+	})
+
 	// Local file serving (when using local storage). Served through the
 	// handler so /uploads/* carries the same preview security headers as the
 	// /api/attachments download endpoint; self-hosted split-origin/same-origin

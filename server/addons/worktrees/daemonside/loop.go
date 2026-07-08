@@ -58,6 +58,7 @@ func (m *Module) pollOnce(ctx context.Context) {
 			op := op
 			go m.handleFileOp(ctx, op)
 		}
+		m.handleTerminals(ctx, resp.Terminals)
 		m.scheduleFileScans(ctx, resp.FileScan)
 	}
 }
@@ -367,7 +368,9 @@ func (m *Module) handleCleanup(ctx context.Context, job shared.Job) {
 	wtPath := m.worktreePath(job)
 	// Stop any run still executing in this worktree first, so the cleanup script
 	// and the worktree removal don't yank the tree out from under a live process.
+	// Terminal shells live in (and under) the per-issue parent, so they go too.
 	m.cancelRunsFor(job.WorktreeID)
+	m.killTerminalsFor(job.IssueID)
 	if mf, err := readManifest(wtPath); err == nil && mf.HasCleanup() {
 		_, _ = runScript(ctx, wtPath, mf.Scripts.Cleanup, m.scriptEnv(job, wtPath), func(stream, text string) {
 			m.log().Debug("worktree cleanup", "issue", job.IssueID, "repo", job.RepoURL, "stream", stream, "line", text)

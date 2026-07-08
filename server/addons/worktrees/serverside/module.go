@@ -9,14 +9,21 @@ import (
 
 // Module is the server half of the worktrees add-on.
 type Module struct {
-	deps    Deps
-	store   *Store
-	fileOps *fileOpRegistry
+	deps      Deps
+	store     *Store
+	fileOps   *fileOpRegistry
+	terminals *terminalRegistry
 }
 
 // New constructs the module over the supplied ports.
 func New(deps Deps) *Module {
-	return &Module{deps: deps, store: NewStore(deps.Pool), fileOps: newFileOpRegistry()}
+	m := &Module{deps: deps, store: NewStore(deps.Pool), fileOps: newFileOpRegistry()}
+	m.terminals = newTerminalRegistry(func(t shared.Terminal, removed bool) {
+		m.publish(t.WorkspaceID, shared.EventWorktreeTerminal, shared.TerminalEvent{
+			IssueID: t.IssueID, Terminal: t, Removed: removed,
+		})
+	})
+	return m
 }
 
 // Store exposes the data layer (used by tests and the adapter if needed).
@@ -30,6 +37,7 @@ func (m *Module) Register(ctx context.Context) error {
 	}
 	m.deps.Subscribe("issue:created", m.onIssueEvent)
 	m.deps.Subscribe("issue:updated", m.onIssueEvent)
+	go m.terminals.janitor(ctx.Done())
 	return nil
 }
 
@@ -79,10 +87,12 @@ func (m *Module) checkout(ev IssueEvent) {
 }
 
 // cleanup queues the cleanup script + worktree removal for every worktree of a
-// closed issue.
+// closed issue, and ends the issue's live terminal sessions (their shells run
+// inside the tree that is about to be removed).
 func (m *Module) cleanup(ev IssueEvent) {
 	ctx, cancel := m.bgCtx()
 	defer cancel()
+	m.terminals.closeForIssue(ev.IssueID)
 	wts, err := m.store.MarkCleanupForIssue(ctx, ev.IssueID)
 	if err != nil {
 		m.deps.log().Error("worktrees: mark cleanup failed", "error", err, "issue_id", ev.IssueID)

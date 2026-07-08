@@ -1,19 +1,22 @@
 // Pure tab-state helpers for the worktree log-tab panel. Kept free of React so
 // the reconcile/selection logic can be unit-tested directly (node env).
 
-export type TabKind = "setup" | "run";
+export type TabKind = "setup" | "run" | "terminal";
 
 export interface OpenTab {
   worktreeId: string;
   kind: TabKind;
-  // For run tabs, which named run script (dev, start, …). Empty for setup tabs.
+  // For run tabs, which named run script (dev, start, …). For terminal tabs,
+  // the terminal session id (terminals are issue-scoped: worktreeId is "").
+  // Empty for setup tabs.
   name?: string;
 }
 
 // A tab is uniquely identified by its worktree + kind + name: one Setup tab per
-// repo, and one Run tab per named run script. The channel id (run_task_id /
-// setup_task_id) is NOT part of the identity — it is read live from the worktree
-// so a tab follows a new run started from the same tab instead of remounting.
+// repo, one Run tab per named run script, one terminal tab per session id. The
+// channel id (run_task_id / setup_task_id) is NOT part of the identity — it is
+// read live from the worktree so a tab follows a new run started from the same
+// tab instead of remounting.
 export function tabKey(worktreeId: string, kind: TabKind, name?: string): string {
   return `${worktreeId}:${kind}:${name ?? ""}`;
 }
@@ -50,6 +53,45 @@ export function reconcileSetupTabs(
     const key = tabKey(w.id, "setup");
     if (!openKeys.has(key) && !closed.has(key)) {
       next.push({ worktreeId: w.id, kind: "setup" });
+      changed = true;
+    }
+  }
+
+  return changed ? next : prev;
+}
+
+// Minimal shape the terminal reconcile needs from a session.
+interface TerminalLike {
+  id: string;
+}
+
+// reconcileTerminalTabs reconciles terminal tabs against the live session list:
+//   - prune tabs whose session no longer exists (closed elsewhere / expired)
+//   - auto-open a tab for each live session not explicitly closed here — this
+//     restores tabs after a reload and mirrors sessions opened in another
+//     window. Exited sessions keep their tab (scrollback stays readable) until
+//     the session itself is removed.
+// Returns the SAME array reference when nothing changed (React state hygiene).
+export function reconcileTerminalTabs(
+  prev: OpenTab[],
+  terminals: TerminalLike[],
+  closed: ReadonlySet<string>,
+): OpenTab[] {
+  const liveIds = new Set(terminals.map((t) => t.id));
+  const openIds = new Set(prev.filter((t) => t.kind === "terminal").map((t) => t.name ?? ""));
+  let changed = false;
+
+  const next = prev.filter((t) => {
+    if (t.kind !== "terminal") return true;
+    const keep = liveIds.has(t.name ?? "");
+    if (!keep) changed = true;
+    return keep;
+  });
+
+  for (const term of terminals) {
+    const key = tabKey("", "terminal", term.id);
+    if (!openIds.has(term.id) && !closed.has(key)) {
+      next.push({ worktreeId: "", kind: "terminal", name: term.id });
       changed = true;
     }
   }

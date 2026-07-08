@@ -6,6 +6,7 @@ import {
 } from "@tanstack/react-query";
 import * as wapi from "./api";
 import type {
+  IssueTerminal,
   IssueWorktree,
   WorktreeFileContent,
   WorktreeFileDiff,
@@ -22,6 +23,7 @@ export const worktreeKeys = {
   // Prefix for every diff of one worktree — what the changes WS event invalidates.
   diffs: (worktreeId: string) => ["worktrees", "diff", worktreeId] as const,
   diff: (worktreeId: string, path: string) => ["worktrees", "diff", worktreeId, path] as const,
+  terminals: (issueId: string) => ["worktrees", "terminals", issueId] as const,
 };
 
 export function issueWorktreesOptions(issueId: string) {
@@ -191,6 +193,63 @@ export function useSaveWorktreeFile(issueId: string) {
         truncated: false,
         binary: false,
       });
+    },
+  });
+}
+
+// The issue's live terminal sessions. The terminal WS event patches this cache
+// directly (payload carries the full snapshot), so no polling; staleTime keeps
+// tab-switch remounts from refetching.
+export function useIssueTerminals(issueId: string) {
+  return useQuery<IssueTerminal[]>({
+    queryKey: worktreeKeys.terminals(issueId),
+    queryFn: () => wapi.listIssueTerminals(issueId),
+    staleTime: 15_000,
+  });
+}
+
+// applyTerminalEvent patches one session snapshot into the terminals cache:
+// upsert (sorted by tab ordinal) or remove.
+export function applyTerminalEvent(
+  old: IssueTerminal[] | undefined,
+  terminal: IssueTerminal,
+  removed: boolean,
+): IssueTerminal[] {
+  const rest = (old ?? []).filter((t) => t.id !== terminal.id);
+  if (removed) return rest;
+  rest.push(terminal);
+  rest.sort((a, b) => a.index - b.index);
+  return rest;
+}
+
+export function useCreateTerminal(issueId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (size: { cols: number; rows: number }) => wapi.createIssueTerminal(issueId, size),
+    onSuccess: (t) => {
+      qc.setQueryData<IssueTerminal[]>(worktreeKeys.terminals(issueId), (old) =>
+        applyTerminalEvent(old, t, false),
+      );
+    },
+  });
+}
+
+export function useCloseTerminal(issueId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (terminalId: string) => wapi.closeIssueTerminal(issueId, terminalId),
+    // Optimistic: the tab disappears immediately; the WS removed-event is the
+    // authoritative confirmation for other viewers.
+    onMutate: async (terminalId) => {
+      await qc.cancelQueries({ queryKey: worktreeKeys.terminals(issueId) });
+      const prev = qc.getQueryData<IssueTerminal[]>(worktreeKeys.terminals(issueId));
+      qc.setQueryData<IssueTerminal[]>(worktreeKeys.terminals(issueId), (old = []) =>
+        old.filter((t) => t.id !== terminalId),
+      );
+      return { prev };
+    },
+    onError: (_e, _v, ctx) => {
+      if (ctx?.prev) qc.setQueryData(worktreeKeys.terminals(issueId), ctx.prev);
     },
   });
 }

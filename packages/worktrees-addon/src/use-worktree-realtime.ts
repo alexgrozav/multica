@@ -3,16 +3,19 @@
 import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useWS } from "@multica/core/realtime";
-import { worktreeKeys } from "./queries";
+import { applyTerminalEvent, worktreeKeys } from "./queries";
 import { mergeBySeq } from "./merge";
 import {
   WORKTREE_CHANGES_EVENT,
   WORKTREE_FILES_EVENT,
   WORKTREE_RUN_LOG_EVENT,
+  WORKTREE_TERMINAL_EVENT,
   WORKTREE_UPDATED_EVENT,
+  type IssueTerminal,
   type WorktreeChangesUpdatedEvent,
   type WorktreeFilesUpdatedEvent,
   type WorktreeRunLog,
+  type WorktreeTerminalEvent,
   type WorktreeUpdatedEvent,
 } from "./types";
 
@@ -43,9 +46,20 @@ export function useWorktreeRealtime(issueId: string) {
       qc.invalidateQueries({ queryKey: worktreeKeys.list(issueId) });
     });
 
+    // Terminal lifecycle events carry the full snapshot — patch the cache
+    // directly (no refetch) so tab labels/status track titles live.
+    const unsubTerminal = subscribe(WORKTREE_TERMINAL_EVENT as WSEvent, (payload) => {
+      const p = payload as WorktreeTerminalEvent;
+      if (!p?.terminal?.id || p.issue_id !== issueId) return;
+      qc.setQueryData<IssueTerminal[]>(worktreeKeys.terminals(issueId), (old) =>
+        applyTerminalEvent(old, p.terminal, p.removed === true),
+      );
+    });
+
     return () => {
       unsubLog();
       unsubUpdated();
+      unsubTerminal();
     };
   }, [qc, subscribe, issueId]);
 }

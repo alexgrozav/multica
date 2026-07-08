@@ -2,26 +2,59 @@
 import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import type { IssueWorktree, WorktreeRunLog } from "./types";
+import type { IssueTerminal, IssueWorktree, WorktreeRunLog } from "./types";
 
 // Mutable fixtures the mocked hooks read from, reset per test.
 let worktrees: IssueWorktree[] = [];
+let terminals: IssueTerminal[] = [];
 let logLines: Record<string, WorktreeRunLog[]> = {};
 const runMutate = vi.fn();
 const setupMutate = vi.fn();
 const stopMutate = vi.fn();
+const closeTerminalMutate = vi.fn();
+// The context passes per-call callbacks; the mock mimics a successful create.
+const createTerminalMutate = vi.fn(
+  (_vars: unknown, opts?: { onSuccess?: (t: IssueTerminal) => void }) => {
+    const t = makeTerminal({ id: `t${terminals.length + 1}`, index: terminals.length + 1 });
+    terminals = [...terminals, t];
+    opts?.onSuccess?.(t);
+  },
+);
 
 vi.mock("./queries", () => ({
   useIssueWorktrees: () => ({ data: worktrees }),
+  useIssueTerminals: () => ({ data: terminals }),
   useRunWorktreeScript: () => ({ mutate: runMutate, isPending: false }),
   useRunWorktreeSetup: () => ({ mutate: setupMutate, isPending: false }),
   useStopWorktreeScript: () => ({ mutate: stopMutate, isPending: false }),
+  useCreateTerminal: () => ({ mutate: createTerminalMutate, isPending: false }),
+  useCloseTerminal: () => ({ mutate: closeTerminalMutate, isPending: false }),
   useWorktreeRunLog: (id?: string) => ({ data: id ? (logLines[id] ?? []) : [] }),
 }));
 vi.mock("./use-worktree-realtime", () => ({ useWorktreeRealtime: () => {} }));
+// The real view needs xterm + a WebSocket; the tab integration only cares that
+// the right session mounts.
+vi.mock("./terminal-view", () => ({
+  TerminalView: ({ terminalId }: { terminalId: string }) => (
+    <div data-testid={`terminal-view-${terminalId}`} />
+  ),
+}));
 
 import { WorktreeSidebarLayout } from "./worktree-sidebar-layout";
 import { RunScriptsSection } from "./run-scripts-section";
+
+function makeTerminal(over: Partial<IssueTerminal> = {}): IssueTerminal {
+  return {
+    id: "t1",
+    issue_id: "i1",
+    workspace_id: "ws1",
+    index: 1,
+    title: "",
+    status: "open",
+    created_at: "",
+    ...over,
+  };
+}
 
 function makeWorktree(over: Partial<IssueWorktree> = {}): IssueWorktree {
   return {
@@ -56,10 +89,13 @@ function renderPanel() {
 
 beforeEach(() => {
   worktrees = [];
+  terminals = [];
   logLines = {};
   runMutate.mockClear();
   setupMutate.mockClear();
   stopMutate.mockClear();
+  createTerminalMutate.mockClear();
+  closeTerminalMutate.mockClear();
 });
 
 // No vitest config in this package → no auto-cleanup; unmount between tests so
@@ -126,5 +162,61 @@ describe("WorktreeLogTabs + RunScriptsSection integration", () => {
     );
     expect(screen.getByTestId("sidebar-body")).toBeInTheDocument();
     expect(container.querySelector('[role="tab"]')).toBeNull();
+  });
+});
+
+describe("terminal tabs", () => {
+  it("the + button opens a new terminal session as the active tab", () => {
+    worktrees = [makeWorktree({ has_setup: false })];
+    renderPanel();
+
+    fireEvent.click(screen.getByRole("button", { name: "New terminal" }));
+    expect(createTerminalMutate).toHaveBeenCalledTimes(1);
+    const tab = screen.getByRole("tab", { name: /Terminal 1/ });
+    expect(tab).toHaveAttribute("data-active");
+    expect(screen.getByTestId("terminal-view-t1")).toBeInTheDocument();
+  });
+
+  it("offers the + button even when no tabs are open", () => {
+    worktrees = [makeWorktree({ has_setup: false })];
+    renderPanel();
+
+    expect(screen.queryByRole("tab")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "New terminal" })).toBeInTheDocument();
+  });
+
+  it("auto-opens tabs for live sessions and labels them with the foreground process", () => {
+    worktrees = [makeWorktree({ has_setup: false })];
+    terminals = [
+      makeTerminal({ id: "t1", index: 1, title: "make" }),
+      makeTerminal({ id: "t2", index: 2 }),
+    ];
+    renderPanel();
+
+    expect(screen.getByRole("tab", { name: /Terminal 1 \(make\)/ })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /Terminal 2/ })).toBeInTheDocument();
+    expect(screen.getByTestId("terminal-view-t1")).toBeInTheDocument();
+    expect(screen.getByTestId("terminal-view-t2")).toBeInTheDocument();
+  });
+
+  it("closing a terminal tab ends the session", () => {
+    worktrees = [makeWorktree({ has_setup: false })];
+    terminals = [makeTerminal({ id: "t1", index: 1 })];
+    renderPanel();
+
+    const tab = screen.getByRole("tab", { name: /Terminal 1/ });
+    fireEvent.click(within(tab).getByLabelText("Close tab"));
+    expect(closeTerminalMutate).toHaveBeenCalledWith("t1");
+    expect(screen.queryByRole("tab", { name: /Terminal 1/ })).not.toBeInTheDocument();
+  });
+
+  it("keeps terminal panels mounted while other tabs are active", () => {
+    worktrees = [makeWorktree()]; // has_setup → a Setup tab exists too
+    terminals = [makeTerminal({ id: "t1", index: 1 })];
+    renderPanel();
+
+    // Activate the Setup tab; the terminal view must stay in the DOM.
+    fireEvent.click(screen.getByRole("tab", { name: /repoA\s*setup/i }));
+    expect(screen.getByTestId("terminal-view-t1")).toBeInTheDocument();
   });
 });

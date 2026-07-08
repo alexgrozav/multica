@@ -21,6 +21,10 @@ var (
 	ErrNoSetupScript  = errors.New("no setup script configured")
 	ErrDaemonOffline  = errors.New("owning machine offline")
 	ErrAlreadyRunning = errors.New("run already in progress")
+
+	// ErrTooManyTerminals rejects opening more live terminal sessions on one
+	// issue than the relay allows.
+	ErrTooManyTerminals = errors.New("too many open terminals")
 )
 
 // Store is the add-on's data-access layer over a pgx pool.
@@ -392,6 +396,30 @@ func (s *Store) RequestOpen(ctx context.Context, issueID, wsID, target string) (
 	if _, err := s.db.Exec(ctx,
 		`UPDATE issue_worktree SET pending_open=$2, updated_at=now() WHERE id=$1`, wt.ID, target); err != nil {
 		return shared.Worktree{}, err
+	}
+	return wt, nil
+}
+
+// TerminalHost picks the worktree whose owning (online) daemon should host a
+// new terminal session for the issue. Same selection as RequestOpen — any one
+// ready worktree identifies the machine; the daemon resolves the per-issue
+// working directory itself — but read-only (terminal delivery is in-memory
+// relay state, not a DB job).
+func (s *Store) TerminalHost(ctx context.Context, issueID, wsID string) (shared.Worktree, error) {
+	wt, err := s.getBy(ctx, worktreeSelect+
+		` WHERE iw.issue_id=$1 AND iw.workspace_id=$2 AND iw.status='ready' ORDER BY iw.repo_url LIMIT 1`, issueID, wsID)
+	if errors.Is(err, ErrNotFound) {
+		return shared.Worktree{}, ErrNotReady // no checked-out worktree yet
+	}
+	if err != nil {
+		return shared.Worktree{}, err
+	}
+	online, err := s.DaemonOnline(ctx, wt.WorkspaceID, wt.OwnerDaemonID)
+	if err != nil {
+		return shared.Worktree{}, err
+	}
+	if !online {
+		return shared.Worktree{}, ErrDaemonOffline
 	}
 	return wt, nil
 }

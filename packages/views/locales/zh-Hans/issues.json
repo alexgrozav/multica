@@ -208,6 +208,7 @@
     "prop_created_by": "创建者",
     "prop_created": "创建时间",
     "prop_updated": "更新时间",
+    "prop_branch": "分支",
     "prop_input": "输入",
     "prop_output": "输出",
     "prop_cache": "缓存",

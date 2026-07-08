@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	worktreesdaemon "github.com/multica-ai/multica/server/addons/worktrees/daemonside"
 	"github.com/multica-ai/multica/server/internal/cli"
 	"github.com/multica-ai/multica/server/internal/daemon/execenv"
 	"github.com/multica-ai/multica/server/internal/daemon/repocache"
@@ -3604,6 +3605,19 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if localAssignment == nil {
 		perIssueDir = d.issueWorktreeWorkDir(task)
 	}
+	// Unified worktrees: the add-on checks this task's repos out inside the
+	// per-issue workdir on the issue branch (task.IssueBranch, resolved
+	// server-side with the same shared helper the checkout uses). Tell the
+	// brief — repo subdirectory names + the branch — so the agent works and
+	// commits THERE instead of minting a fresh agent/* branch via
+	// `multica repo checkout`. Empty IssueBranch (old server) keeps the
+	// legacy checkout-on-demand brief.
+	if perIssueDir != "" && task.IssueBranch != "" {
+		taskCtx.CheckedOutBranch = task.IssueBranch
+		for i := range taskCtx.Repos {
+			taskCtx.Repos[i].Dir = worktreesdaemon.RepoDirName(taskCtx.Repos[i].URL)
+		}
+	}
 	switch {
 	case perIssueDir != "" && execenv.IsPreparedEnv(perIssueDir):
 		env = execenv.Reuse(execenv.ReuseParams{
@@ -3768,6 +3782,12 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	}
 	if task.AutopilotID != "" {
 		agentEnv["MULTICA_AUTOPILOT_ID"] = task.AutopilotID
+	}
+	// The issue branch the pre-checked-out worktrees are on (unified model
+	// only — see the CheckedOutBranch assignment above). Lets scripts and
+	// skills target the right branch without parsing the brief.
+	if taskCtx.CheckedOutBranch != "" {
+		agentEnv["MULTICA_ISSUE_BRANCH"] = taskCtx.CheckedOutBranch
 	}
 	// Quick-create marker — when set, the multica CLI's `issue create`
 	// command stamps the new issue with origin_type=quick_create +

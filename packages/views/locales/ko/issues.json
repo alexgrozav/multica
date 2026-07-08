@@ -208,6 +208,7 @@
     "prop_created_by": "생성자",
     "prop_created": "생성일",
     "prop_updated": "수정일",
+    "prop_branch": "브랜치",
     "prop_input": "입력",
     "prop_output": "출력",
     "prop_cache": "캐시",

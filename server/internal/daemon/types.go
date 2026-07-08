@@ -63,6 +63,7 @@ type Task struct {
 	Agent                    *AgentData            `json:"agent,omitempty"`
 	ConnectedApps            []ConnectedAppData    `json:"connected_apps,omitempty"` // per-run app capabilities mounted through runtime MCP overlays
 	Repos                    []RepoData            `json:"repos,omitempty"`
+	IssueBranch              string                `json:"issue_branch,omitempty"`                // git branch the issue's worktrees check out (custom branch_name or identifier default); "" on old servers
 	ProjectID                string                `json:"project_id,omitempty"`                  // issue's project, when present
 	ProjectTitle             string                `json:"project_title,omitempty"`               // human-readable project title for context injection
 	ProjectDescription       string                `json:"project_description,omitempty"`         // durable project-level context injected into the brief

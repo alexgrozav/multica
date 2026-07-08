@@ -161,6 +161,9 @@ wakes the parent assignee. Promoting the next stage's `backlog` sub-issues to
 | Copied onto worktree rows → carried on daemon jobs as `Job.Branch` | `server/addons/worktrees/serverside/store.go:170` |
 | Reuse-or-create checkout: existing local branch as-is → remote branch continued → else created from base | `server/addons/worktrees/daemonside/git.go:113,129,132` |
 | Custom branch kept (not `-D`'d) on issue-close cleanup | `server/addons/worktrees/daemonside/git.go:152`; `loop.go:383` |
+| Claim payload carries the resolved branch (`issue_branch`, shared derivation) | `server/internal/handler/daemon.go` (ClaimTaskByRuntime issue block); `server/addons/worktrees/shared/branch.go` (`IssueBranch`) |
+| Brief announces pre-checked-out repos + branch; `MULTICA_ISSUE_BRANCH` env | `server/internal/daemon/daemon.go` (`taskCtx.CheckedOutBranch`, `agentEnv`); `execenv/runtime_config.go` + `runtime_config_sections.go` (`writeRepositories`) |
+| `multica repo checkout` adopts a managed issue worktree (no reset, no agent/* branch) | `server/internal/daemon/worktree_addon.go` (`adoptManagedWorktree`); `health.go` (repoCheckoutHandler) |
 | Webhook links a PR to issues whose `branch_name` == PR head ref (qualifying, no close intent) | `server/internal/handler/github.go:924` (folds into the identifier link loop) |
 | Issue-create backfill links already-mirrored PRs on the pinned branch | `server/internal/handler/github.go:1442` (`linkPullRequestsForIssueBranch`), called from `issue.go:2361` |
 

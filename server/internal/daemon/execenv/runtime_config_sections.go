@@ -194,7 +194,7 @@ func sanitizeBriefCodeToken(s string) string {
 // The fold-aware `--full` flag from MUL-3555 is documented inline on the
 // comment-list bullet so the slim brief preserves the same agent
 // behaviour as the legacy brief on that path.
-func writeAvailableCommands(b *strings.Builder) {
+func writeAvailableCommands(b *strings.Builder, ctx TaskContextForEnv) {
 	b.WriteString("## Available Commands\n\n")
 	b.WriteString("Prefer `--output json` for structured data. The default brief lists only the core agent loop and common issue create/update tasks; for everything else run `multica --help` or `multica <command> --help`.\n\n")
 	b.WriteString("### Core\n")
@@ -208,7 +208,11 @@ func writeAvailableCommands(b *strings.Builder) {
 	b.WriteString("- `multica issue metadata list <issue-id> [--output json]` — list KV metadata.\n")
 	b.WriteString("- `multica issue metadata set <issue-id> --key <k> --value <v> [--type string|number|bool]` — pin or overwrite a key.\n")
 	b.WriteString("- `multica issue metadata delete <issue-id> --key <k>` — remove a key.\n")
-	b.WriteString("- `multica repo checkout <url> [--ref <branch-or-sha>]` — git worktree on a dedicated branch.\n\n")
+	if ctx.CheckedOutBranch != "" {
+		b.WriteString("- `multica repo checkout <url> [--ref <branch-or-sha>]` — fetch a repo NOT already in your working directory (this issue's repos already are — see Repositories; never re-checkout those).\n\n")
+	} else {
+		b.WriteString("- `multica repo checkout <url> [--ref <branch-or-sha>]` — git worktree on a dedicated branch.\n\n")
+	}
 	b.WriteString("### Squad maintenance\n")
 	b.WriteString("- `multica squad member set-role <squad-id> --member-id <id> --member-type <agent|member> --role <role> [--output json]` — change role in place (use this instead of remove+add).\n\n")
 }
@@ -239,11 +243,34 @@ func writeCommentFormatting(b *strings.Builder) {
 // writeRepositories emits the Repositories section when at least one repo
 // is configured. The closing paragraph from the legacy version is dropped
 // (it re-stated the opening); intro is tightened into one line.
+//
+// Two variants: when the worktrees add-on pre-checked the repos out
+// (ctx.CheckedOutBranch set), the section names each repo's local directory
+// and the branch, and forbids re-checkout — the historical text told agents
+// to run `multica repo checkout`, which minted a fresh agent/* branch and
+// reset the managed worktree, abandoning the issue's branch. Otherwise the
+// legacy checkout-on-demand text is kept.
 func writeRepositories(b *strings.Builder, ctx TaskContextForEnv) {
 	if len(ctx.Repos) == 0 {
 		return
 	}
 	b.WriteString("## Repositories\n\n")
+	if ctx.CheckedOutBranch != "" {
+		fmt.Fprintf(b, "Already checked out in your working directory on branch `%s` — one subdirectory per repo:\n\n", ctx.CheckedOutBranch)
+		for _, repo := range ctx.Repos {
+			dir := repo.Dir
+			if dir == "" {
+				dir = "<repo>"
+			}
+			if repo.Description != "" {
+				fmt.Fprintf(b, "- `./%s` — %s — %s\n", dir, repo.URL, repo.Description)
+			} else {
+				fmt.Fprintf(b, "- `./%s` — %s\n", dir, repo.URL)
+			}
+		}
+		fmt.Fprintf(b, "\nWork directly in these directories: commit on `%s` and push that branch (`git push -u origin %s`) when publishing work or opening a PR. Do NOT create or switch to another branch, and do NOT run `multica repo checkout` for these repos — it is only for fetching OTHER repos (read-only reference).\n\n", ctx.CheckedOutBranch, ctx.CheckedOutBranch)
+		return
+	}
 	b.WriteString("Available in this workspace — `multica repo checkout <url> [--ref <branch-or-sha>]` to fetch (creates a git worktree on a dedicated branch).\n\n")
 	for _, repo := range ctx.Repos {
 		if repo.Description != "" {
@@ -530,7 +557,7 @@ func buildMetaSkillContentSlim(provider string, ctx TaskContextForEnv) string {
 	case kindQuickCreate:
 		writeAvailableCommandsQuickCreate(&b)
 	default:
-		writeAvailableCommands(&b)
+		writeAvailableCommands(&b, ctx)
 	}
 
 	if kind == kindCommentTriggered || kind == kindAssignmentTriggered {

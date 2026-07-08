@@ -17,6 +17,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	worktreeshared "github.com/multica-ai/multica/server/addons/worktrees/shared"
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/daemonws"
@@ -1418,6 +1419,18 @@ func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 		if issue, err := h.Queries.GetIssue(r.Context(), task.IssueID); err == nil {
 			resp.WorkspaceID = uuidToString(issue.WorkspaceID)
 			resp.ThreadName = issue.Title
+
+			// IssueBranch is the git branch this issue's worktrees check out:
+			// the custom branch pinned at create, or the identifier-derived
+			// default. Resolved with the SAME shared helper the worktrees
+			// daemon uses for the actual checkout, so the brief/env the agent
+			// sees can never drift from the branch under its feet.
+			resp.IssueBranch = issue.BranchName
+			if resp.IssueBranch == "" {
+				prefix := h.getIssuePrefix(r.Context(), issue.WorkspaceID)
+				identifier := fmt.Sprintf("%s-%d", prefix, issue.Number)
+				resp.IssueBranch = worktreeshared.IssueBranch(identifier, uuidToString(issue.ID))
+			}
 
 			// Squad-leader briefing injection: keyed off the task being a
 			// leader-task (is_leader_task) carrying a squad_id — NOT off the

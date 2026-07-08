@@ -242,6 +242,15 @@ issue closes. Invalid ref names are rejected at create with a 400. PRs whose
 head is the custom branch auto-link to the issue by branch identity — no issue
 key needed in the PR (see the Linking section above).
 
+Inside an issue run the branch is ambient: the runtime brief's Repositories
+section lists each pre-checked-out repo directory and the branch, and
+`MULTICA_ISSUE_BRANCH` carries it in the environment. Work and commit in
+those directories on that branch and push it for PRs — do not create a new
+branch and do not re-run `multica repo checkout` for this issue's repos
+(re-checkout of a managed worktree is adopted server-side: it returns the
+existing checkout untouched instead of resetting onto a fresh `agent/*`
+branch).
+
 ## Incorrect → correct
 
 PR title (link the issue):

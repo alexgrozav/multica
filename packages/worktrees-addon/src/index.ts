@@ -22,4 +22,5 @@ export {
   useOpenIssueWorktree,
 } from "./queries";
 export { mergeBySeq } from "./merge";
+export { repoLabel } from "./repo-label";
 export * from "./types";

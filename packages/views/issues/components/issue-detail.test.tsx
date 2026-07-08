@@ -231,6 +231,15 @@ vi.mock("@multica/core/api", () => ({
   setApiInstance: vi.fn(),
 }));
 
+// Partial addon mock: only the worktree-list hook is stubbed (it feeds the
+// Details section's Branch rows); every component keeps its real
+// implementation so the rest of the detail view renders as in production.
+const mockUseIssueWorktrees = vi.hoisted(() => vi.fn());
+vi.mock("@multica/worktrees-addon", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@multica/worktrees-addon")>()),
+  useIssueWorktrees: mockUseIssueWorktrees,
+}));
+
 // Mock issue config
 vi.mock("@multica/core/issues/config", () => ({
   ALL_STATUSES: ["backlog", "todo", "in_progress", "in_review", "done", "blocked", "cancelled"],
@@ -515,6 +524,7 @@ describe("IssueDetail (shared)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockViewport.isMobile = false;
+    mockUseIssueWorktrees.mockReturnValue({ data: undefined });
     // Default: issue loads successfully
     mockApiObj.getIssue.mockResolvedValue(mockIssue);
     // /timeline returns the entries flat in chronological order (oldest first).
@@ -553,6 +563,75 @@ describe("IssueDetail (shared)", () => {
     });
 
     expect(screen.getByDisplayValue("Add JWT auth to the backend")).toBeInTheDocument();
+  });
+
+  describe("worktree branch in Details", () => {
+    const worktree = (repo: string, branch: string, status = "ready") => ({
+      id: `wt-${repo}`,
+      issue_id: "issue-1",
+      identifier: "TES-1",
+      workspace_id: "ws-1",
+      repo_url: `https://github.com/acme/${repo}.git`,
+      path: `/tmp/${repo}`,
+      branch,
+      status,
+      setup_status: "none",
+      has_setup: false,
+      has_cleanup: false,
+      runs: [],
+      created_at: "2026-01-15T00:00:00Z",
+      updated_at: "2026-01-15T00:00:00Z",
+    });
+
+    it("shows a single Branch row when every repo is on the same branch", async () => {
+      mockUseIssueWorktrees.mockReturnValue({
+        data: [worktree("widget", "feature/login"), worktree("gadget", "feature/login")],
+      });
+      renderIssueDetail();
+
+      expect(await screen.findByText("feature/login")).toBeInTheDocument();
+      expect(screen.getByText("Branch")).toBeInTheDocument();
+      // Collapsed: one row, not one per repo.
+      expect(screen.getAllByText("feature/login")).toHaveLength(1);
+    });
+
+    it("shows one repo-labeled row per repo when branches diverge", async () => {
+      mockUseIssueWorktrees.mockReturnValue({
+        data: [worktree("widget", "feature/api"), worktree("gadget", "main")],
+      });
+      renderIssueDetail();
+
+      expect(await screen.findByText("feature/api")).toBeInTheDocument();
+      expect(screen.getByText("main")).toBeInTheDocument();
+      expect(screen.getByText("widget")).toBeInTheDocument();
+      expect(screen.getByText("gadget")).toBeInTheDocument();
+    });
+
+    it("falls back to the pinned branch_name before checkout", async () => {
+      mockApiObj.getIssue.mockResolvedValue({ ...mockIssue, branch_name: "feature/pinned" });
+      renderIssueDetail();
+
+      expect(await screen.findByText("feature/pinned")).toBeInTheDocument();
+      expect(screen.getByText("Branch")).toBeInTheDocument();
+    });
+
+    it("renders no Branch row without worktrees or a pinned branch", async () => {
+      renderIssueDetail();
+
+      await screen.findByDisplayValue("Implement authentication");
+      expect(screen.queryByText("Branch")).not.toBeInTheDocument();
+    });
+
+    it("ignores removed worktrees", async () => {
+      mockUseIssueWorktrees.mockReturnValue({
+        data: [worktree("widget", "feature/gone", "removed")],
+      });
+      renderIssueDetail();
+
+      await screen.findByDisplayValue("Implement authentication");
+      expect(screen.queryByText("feature/gone")).not.toBeInTheDocument();
+      expect(screen.queryByText("Branch")).not.toBeInTheDocument();
+    });
   });
 
   it("opts the description editor into the unmount flush", async () => {

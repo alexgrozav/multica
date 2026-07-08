@@ -208,6 +208,7 @@
     "prop_created_by": "作成者",
     "prop_created": "作成日",
     "prop_updated": "更新日",
+    "prop_branch": "ブランチ",
     "prop_input": "入力",
     "prop_output": "出力",
     "prop_cache": "キャッシュ",

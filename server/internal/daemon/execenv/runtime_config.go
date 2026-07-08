@@ -504,7 +504,11 @@ func buildMetaSkillContent(provider string, ctx TaskContextForEnv) string {
 	b.WriteString("- `multica issue comment list <issue-id> [--thread <comment-id> [--tail N] | --recent N] [--before <ts> --before-id <uuid>] [--since <RFC3339>] [--full] --output json` — List comments on an issue. Default returns the full flat timeline (server cap 2000). On busy issues prefer the thread-aware reads: `--thread <comment-id>` returns one conversation (root + every reply); `--thread <id> --tail N` caps replies to the N most recent (root is always included, even at `--tail 0`); `--recent N` returns the N most recently active threads. **Resolve-aware folding is on by default for the complete-thread reads (default list, `--recent`, `--thread` without `--tail`): a resolved thread collapses to its root + conclusion comment (reply-resolved) or its root only (root-resolved), with the dropped count reported on the root as `folded_count` and `thread_resolved: true` — so you skip settled discussion. Pass `--full` to get a folded thread's complete discussion. Folding never applies to `--since`/`--tail`/`--roots-only` reads (they return partial threads), so `--full` is a no-op there.** `--before` / `--before-id` walks older replies under `--thread --tail` (stderr label: `Next reply cursor`) or older threads under `--recent` (stderr label: `Next thread cursor`). `--since` is for incremental polling and may combine with `--thread` (with or without `--tail`) or `--recent`.\n")
 	b.WriteString("- `multica issue create --title \"...\" [--description \"...\" | --description-file <path> | --description-stdin] [--priority X] [--status X] [--assignee X | --assignee-id <uuid>] [--parent <issue-id>] [--stage N] [--project <project-id>] [--due-date <RFC3339>] [--attachment <path>]` — Create a new issue; `--attachment` may be repeated. `--stage N` (N ≥ 1) groups a sub-issue into an ordered barrier group under its parent so the parent wakes per stage, not per child. For agent-authored long descriptions, prefer `--description-file <path>` — flags after a HEREDOC terminator can be silently swallowed (#4182).\n")
 	b.WriteString("- `multica issue update <id> [--title X] [--description X | --description-file <path> | --description-stdin] [--priority X] [--status X] [--assignee X | --assignee-id <uuid>] [--parent <issue-id>] [--stage N] [--project <project-id>] [--due-date <RFC3339>]` — Update issue fields; use `--parent \"\"` to clear parent. For agent-authored long descriptions, prefer `--description-file <path>` over stdin (#4182).\n")
-	b.WriteString("- `multica repo checkout <url> [--ref <branch-or-sha>]` — Check out a repository into the working directory (creates a git worktree with a dedicated branch; use `--ref` for review/QA on a specific branch, tag, or commit)\n")
+	if ctx.CheckedOutBranch != "" {
+		b.WriteString("- `multica repo checkout <url> [--ref <branch-or-sha>]` — Fetch a repository NOT already in your working directory (this issue's repos already are — see ## Repositories; never re-checkout those)\n")
+	} else {
+		b.WriteString("- `multica repo checkout <url> [--ref <branch-or-sha>]` — Check out a repository into the working directory (creates a git worktree with a dedicated branch; use `--ref` for review/QA on a specific branch, tag, or commit)\n")
+	}
 	b.WriteString("- `multica issue status <id> <status>` — Shortcut for `issue update --status` when you only need to flip status (todo, in_progress, in_review, done, blocked, backlog, cancelled)\n")
 	b.WriteString("- `multica issue children <id> [--output json]` — List a parent's sub-issues grouped by stage (table or JSON), so you can see how many children there are, which stage each is in, and which stage to promote next.\n")
 	// Available Commands lists `multica issue comment add` with all three input
@@ -569,23 +573,42 @@ func buildMetaSkillContent(provider string, ctx TaskContextForEnv) string {
 		b.WriteString("Do not compress a multi-paragraph answer into one line and do not rely on `\\n` escapes.\n\n")
 	}
 
-	// Inject available repositories section.
+	// Inject available repositories section. Two variants: pre-checked-out
+	// (worktrees add-on, unified model — name each repo's local dir + the
+	// issue branch and forbid re-checkout, which used to reset the managed
+	// worktree onto a fresh agent/* branch) vs legacy checkout-on-demand.
 	if len(ctx.Repos) > 0 {
 		b.WriteString("## Repositories\n\n")
-		b.WriteString("The following code repositories are available in this workspace.\n")
-		b.WriteString("Use `multica repo checkout <url>` to check out a repository into your working directory. Add `--ref <branch-or-sha>` when you need an exact branch, tag, or commit.\n\n")
-		for _, repo := range ctx.Repos {
-			refHint := ""
-			if repo.Ref != "" {
-				refHint = fmt.Sprintf(" (default ref: `%s`)", repo.Ref)
+		if ctx.CheckedOutBranch != "" {
+			fmt.Fprintf(&b, "Already checked out in your working directory on branch `%s` — one subdirectory per repo:\n\n", ctx.CheckedOutBranch)
+			for _, repo := range ctx.Repos {
+				dir := repo.Dir
+				if dir == "" {
+					dir = "<repo>"
+				}
+				if repo.Description != "" {
+					fmt.Fprintf(&b, "- `./%s` — %s — %s\n", dir, repo.URL, repo.Description)
+				} else {
+					fmt.Fprintf(&b, "- `./%s` — %s\n", dir, repo.URL)
+				}
 			}
-			if repo.Description != "" {
-				fmt.Fprintf(&b, "- %s%s — %s\n", repo.URL, refHint, repo.Description)
-			} else {
-				fmt.Fprintf(&b, "- %s%s\n", repo.URL, refHint)
+			fmt.Fprintf(&b, "\nWork directly in these directories: commit on `%s` and push that branch (`git push -u origin %s`) when publishing work or opening a PR. Do NOT create or switch to another branch, and do NOT run `multica repo checkout` for these repos — it is only for fetching OTHER repos (read-only reference).\n\n", ctx.CheckedOutBranch, ctx.CheckedOutBranch)
+		} else {
+			b.WriteString("The following code repositories are available in this workspace.\n")
+			b.WriteString("Use `multica repo checkout <url>` to check out a repository into your working directory. Add `--ref <branch-or-sha>` when you need an exact branch, tag, or commit.\n\n")
+			for _, repo := range ctx.Repos {
+				refHint := ""
+				if repo.Ref != "" {
+					refHint = fmt.Sprintf(" (default ref: `%s`)", repo.Ref)
+				}
+				if repo.Description != "" {
+					fmt.Fprintf(&b, "- %s%s — %s\n", repo.URL, refHint, repo.Description)
+				} else {
+					fmt.Fprintf(&b, "- %s%s\n", repo.URL, refHint)
+				}
 			}
+			b.WriteString("\nThe checkout command creates a git worktree with a dedicated branch. You can check out one or more repos as needed, and can pass `--ref` for review/QA on a non-default branch or commit.\n\n")
 		}
-		b.WriteString("\nThe checkout command creates a git worktree with a dedicated branch. You can check out one or more repos as needed, and can pass `--ref` for review/QA on a non-default branch or commit.\n\n")
 	}
 
 	// Inject project-scoped context (resources attached to the issue's project).

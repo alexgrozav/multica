@@ -211,6 +211,7 @@
     "prop_created_by": "Created by",
     "prop_created": "Created",
     "prop_updated": "Updated",
+    "prop_branch": "Branch",
     "prop_input": "Input",
     "prop_output": "Output",
     "prop_cache": "Cache",

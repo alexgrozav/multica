@@ -19,6 +19,10 @@ type RepoContextForEnv struct {
 	URL         string // remote URL
 	Description string // optional repo description
 	Ref         string // optional default checkout ref for this task
+	// Dir is the repo's subdirectory inside the agent's working directory when
+	// the worktrees add-on has already checked it out there (unified model).
+	// Empty when the repo is checkout-on-demand.
+	Dir string
 }
 
 // ProjectResourceForEnv describes a single resource attached to the issue's
@@ -74,17 +78,23 @@ type PrepareParams struct {
 
 // TaskContextForEnv is the subset of task context used for writing context files.
 type TaskContextForEnv struct {
-	IssueID                 string
-	TriggerCommentID        string // comment that triggered this task (empty for on_assign)
-	TriggerThreadID         string // root comment ID for the triggering thread; falls back to TriggerCommentID when empty
-	NewCommentCount         int    // issue-wide comments since this agent's last run (excludes its own and the injected trigger)
-	NewCommentsSince        string // RFC3339 anchor (last run's started_at) the count is measured from; empty on cold start
-	PriorSessionResumed     bool   // true when the daemon will resume an existing provider session for this task
-	AgentID                 string // unique ID of the dispatched agent
-	AgentName               string
-	AgentInstructions       string // agent identity/persona instructions, injected into CLAUDE.md
-	AgentSkills             []SkillContextForEnv
-	Repos                   []RepoContextForEnv     // workspace repos available for checkout
+	IssueID             string
+	TriggerCommentID    string // comment that triggered this task (empty for on_assign)
+	TriggerThreadID     string // root comment ID for the triggering thread; falls back to TriggerCommentID when empty
+	NewCommentCount     int    // issue-wide comments since this agent's last run (excludes its own and the injected trigger)
+	NewCommentsSince    string // RFC3339 anchor (last run's started_at) the count is measured from; empty on cold start
+	PriorSessionResumed bool   // true when the daemon will resume an existing provider session for this task
+	AgentID             string // unique ID of the dispatched agent
+	AgentName           string
+	AgentInstructions   string // agent identity/persona instructions, injected into CLAUDE.md
+	AgentSkills         []SkillContextForEnv
+	Repos               []RepoContextForEnv // workspace repos available for checkout
+	// CheckedOutBranch, when non-empty, means the worktrees add-on has ALREADY
+	// checked the task's repos out inside the working directory (one subdir
+	// per repo, see RepoContextForEnv.Dir) on this git branch. The brief then
+	// tells the agent to work/commit/push on that branch and never re-checkout
+	// or mint a fresh branch. Empty = legacy checkout-on-demand behavior.
+	CheckedOutBranch        string
 	ProjectID               string                  // issue's project, when present
 	ProjectTitle            string                  // human-readable project title
 	ProjectDescription      string                  // durable project-level context, rendered into the brief's Project Context section

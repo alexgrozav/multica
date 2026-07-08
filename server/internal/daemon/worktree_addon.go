@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -151,6 +152,40 @@ func (d *Daemon) eagerCheckoutTaskRepos(ctx context.Context, task Task, env *exe
 		}
 	}
 	return nil
+}
+
+// adoptManagedWorktree reports whether a `multica repo checkout` request
+// targets a worktree the add-on already manages — the repo's checkout inside
+// the per-issue workdir — and, when it does, returns that checkout as-is
+// (path + current branch). Adoption is what keeps an agent's habitual
+// re-checkout from resetting the managed tree onto a fresh agent/* branch:
+// the worktree is NEVER mutated on this path.
+//
+// A request qualifies when the unified model is on, the requested workdir
+// lies inside this workspace's managed worktrees root (…/<ws>/worktrees/…),
+// and the repo's subdirectory there is an existing git worktree. Anything
+// else falls through to the legacy CreateWorktree behavior.
+func (d *Daemon) adoptManagedWorktree(workspaceID, workDir, repoURL string) (*repocache.WorktreeResult, bool) {
+	if !d.worktreeUnifyEnabled() || workspaceID == "" || workDir == "" {
+		return nil, false
+	}
+	managedRoot := filepath.Join(d.cfg.WorkspacesRoot, workspaceID, "worktrees")
+	rel, err := filepath.Rel(managedRoot, workDir)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil, false
+	}
+	wtPath := filepath.Join(workDir, worktreesdaemon.RepoDirName(repoURL))
+	if !worktreesdaemon.IsWorktree(wtPath) {
+		return nil, false
+	}
+	branch, err := worktreesdaemon.CurrentBranch(wtPath)
+	if err != nil {
+		d.logger.Warn("worktrees: adopt: current branch unreadable; reporting empty", "path", wtPath, "error", err)
+		branch = ""
+	}
+	d.logger.Info("repo checkout: adopted managed issue worktree (no reset, no new branch)",
+		"url", repoURL, "path", wtPath, "branch", branch)
+	return &repocache.WorktreeResult{Path: wtPath, BranchName: branch}, true
 }
 
 // worktreeUnifyEnabled gates the unified per-issue agent workdir. Default ON;

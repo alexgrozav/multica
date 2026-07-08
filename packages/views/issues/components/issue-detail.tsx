@@ -14,6 +14,7 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleCheck,
+  GitBranch,
   Milestone,
   MoreHorizontal,
   PanelRight,
@@ -61,7 +62,7 @@ import { ResolvedThreadBar } from "./resolved-thread-bar";
 import { collectThreadReplies, deriveThreadResolution } from "./thread-utils";
 import { IssueAgentHeaderChip } from "./issue-agent-header-chip";
 import { ExecutionLogSection } from "./execution-log-section";
-import { IssueFileTabsProvider, IssueSidebarTabs, OpenInMenu, RunScriptsSection, WorktreeFileTabs, WorktreeSidebarLayout } from "@multica/worktrees-addon";
+import { IssueFileTabsProvider, IssueSidebarTabs, OpenInMenu, RunScriptsSection, WorktreeFileTabs, WorktreeSidebarLayout, repoLabel, useIssueWorktrees } from "@multica/worktrees-addon";
 import { PullRequestList } from "./pull-request-list";
 import { useGitHubSettings } from "@multica/core/github";
 import { useQuery } from "@tanstack/react-query";
@@ -1092,6 +1093,29 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
   // Token usage
   const { data: usage } = useQuery(issueUsageOptions(id));
 
+  // Worktree branches for the Details section: the actual checked-out branch
+  // per repo once the daemon reports it, falling back to the issue's pinned
+  // branch_name before checkout. Collapses to one unlabeled row when every
+  // repo is on the same branch (the common case); shows one row per repo
+  // when they diverge. Shares the addon's query key, so worktree:updated WS
+  // events keep it live. Empty when the issue has no workspace and no pinned
+  // branch — the rows just don't render.
+  const { data: issueWorktrees } = useIssueWorktrees(id);
+  const branchRows = useMemo(() => {
+    const pinned = issue?.branch_name ?? "";
+    const entries = (issueWorktrees ?? [])
+      .filter((w) => w.status !== "removed")
+      .map((w) => ({ repo: repoLabel(w.repo_url), branch: w.branch || pinned }))
+      .filter((e) => e.branch);
+    if (entries.length === 0) {
+      return pinned ? [{ repo: "", branch: pinned }] : [];
+    }
+    if (new Set(entries.map((e) => e.branch)).size === 1) {
+      return [{ repo: "", branch: entries[0]?.branch ?? "" }];
+    }
+    return entries;
+  }, [issueWorktrees, issue?.branch_name]);
+
   // Attachments uploaded against this issue. Drives the description
   // editor's click-time fresh-sign download: NodeViews match
   // `src`/`href` against this list to resolve an attachment id before
@@ -1633,6 +1657,18 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
           <PropRow label={t(($) => $.detail.prop_updated)}>
             <span className="text-muted-foreground">{shortDate(issue.updated_at)}</span>
           </PropRow>
+          {/* Worktree branch(es): one unlabeled-repo row when all repos share
+              a branch, one row per repo (labeled by repo name) when they
+              diverge. Hidden entirely when there is no workspace and no
+              pinned branch. */}
+          {branchRows.map((row) => (
+            <PropRow key={row.repo || "__branch"} label={row.repo || t(($) => $.detail.prop_branch)}>
+              <GitBranch className="size-3 shrink-0 text-muted-foreground" />
+              <span className="truncate font-mono text-[0.6875rem]" title={row.branch}>
+                {row.branch}
+              </span>
+            </PropRow>
+          ))}
         </div>}
       </div>
 

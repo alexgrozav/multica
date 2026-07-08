@@ -1,8 +1,11 @@
 package daemonside
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
+
+	"github.com/multica-ai/multica/server/addons/worktrees/shared"
 )
 
 // These helpers are the SINGLE source of truth for the per-issue worktree
@@ -30,31 +33,12 @@ func IssueWorktreePath(workspacesRoot, workspaceID, issueID, repoURL string) str
 	return filepath.Join(IssueWorktreeParent(workspacesRoot, workspaceID, issueID), RepoDirName(repoURL))
 }
 
-// IssueBranch is the branch a repo's per-issue worktree is checked out on: the
-// human identifier (e.g. PRO-11), sanitized to a valid git ref. It is NOT under
-// agent/*, so the daemon GC's agent-branch sweep never touches it. Falls back to
-// a short issue id when no identifier is available.
+// IssueBranch is the branch a repo's per-issue worktree is checked out on when
+// no custom branch was requested. Thin alias over the shared implementation —
+// the server derives the same name for agent task payloads (issue_branch), so
+// the two sides can never drift.
 func IssueBranch(identifier, issueID string) string {
-	if b := safeRef(identifier); b != "" {
-		return b
-	}
-	return "issue-" + shortID(issueID)
-}
-
-// safeRef maps an identifier to a valid, collision-free git branch ref. Keeps
-// ref-safe characters and collapses the rest to '-', trimming stray separators.
-func safeRef(s string) string {
-	s = strings.TrimSpace(s)
-	var b strings.Builder
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
-			b.WriteRune(r)
-		default:
-			b.WriteRune('-')
-		}
-	}
-	return strings.Trim(b.String(), "-.")
+	return shared.IssueBranch(identifier, issueID)
 }
 
 // IsWorktree reports whether path is already an existing git worktree.
@@ -68,4 +52,19 @@ func IsWorktree(path string) bool { return isWorktree(path) }
 // and false for derived identifier branches (leftovers restart from base).
 func EnsureWorktreeAt(bare, worktreePath, branch string, reuseExisting bool) (string, error) {
 	return ensureWorktree(bare, worktreePath, branch, reuseExisting)
+}
+
+// CurrentBranch returns the branch a worktree has checked out, or "" for a
+// detached HEAD. Used by the daemon's repo-checkout adoption path to report
+// the managed worktree's actual branch back to the agent.
+func CurrentBranch(worktreePath string) (string, error) {
+	out, err := runGit(worktreePath, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse --abbrev-ref HEAD: %s: %w", strings.TrimSpace(out), err)
+	}
+	b := strings.TrimSpace(out)
+	if b == "HEAD" { // detached
+		return "", nil
+	}
+	return b, nil
 }

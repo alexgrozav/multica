@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/multica-ai/multica/server/addons/worktrees/shared"
 )
 
 func runGit(dir string, args ...string) (string, error) {
@@ -17,18 +19,9 @@ func runGit(dir string, args ...string) (string, error) {
 	return string(out), err
 }
 
-// shortID returns a short, filesystem-safe prefix of an id.
-func shortID(id string) string {
-	id = strings.TrimSpace(id)
-	id = strings.ReplaceAll(id, "-", "")
-	if len(id) > 12 {
-		id = id[:12]
-	}
-	if id == "" {
-		return "issue"
-	}
-	return id
-}
+// shortID returns a short, filesystem-safe prefix of an id (shared so the
+// server can derive matching values where needed).
+func shortID(id string) string { return shared.ShortID(id) }
 
 // repoName derives a stable directory name from a repo URL.
 func repoName(url string) string {

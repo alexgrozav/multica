@@ -462,6 +462,7 @@ func (m *Module) scriptEnv(job shared.Job, wtPath string) []string {
 	return []string{
 		"MULTICA_ISSUE_ID=" + job.IssueID,
 		"MULTICA_ISSUE_IDENTIFIER=" + job.Identifier,
+		"MULTICA_ISSUE_BRANCH=" + m.branchName(job),
 		"MULTICA_WORKSPACE_ID=" + job.WorkspaceID,
 		"MULTICA_REPO_URL=" + job.RepoURL,
 		"MULTICA_WORKTREE_PATH=" + wtPath,

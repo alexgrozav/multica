@@ -180,6 +180,25 @@ func (d *Daemon) repoCheckoutHandler() http.HandlerFunc {
 			return
 		}
 
+		// Unified worktrees guardrail: when the target directory is the
+		// add-on-managed per-issue workdir and this repo is already checked
+		// out there, ADOPT that worktree — return its path + current branch
+		// untouched. The historical fall-through (CreateWorktree →
+		// updateExistingWorktree) ran `git reset --hard` + `git clean -fd`
+		// and switched onto a fresh agent/* branch, silently destroying
+		// uncommitted work and abandoning the issue's branch whenever an
+		// agent re-ran `multica repo checkout` out of habit. Setup is
+		// skipped too: the add-on's init already ran it in this tree.
+		if result, ok := d.adoptManagedWorktree(req.WorkspaceID, req.WorkDir, req.URL); ok {
+			if strings.TrimSpace(req.Ref) != "" {
+				d.logger.Warn("repo checkout: --ref ignored for managed issue worktree; returning the existing checkout",
+					"url", req.URL, "ref", req.Ref, "path", result.Path, "branch", result.BranchName)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(result)
+			return
+		}
+
 		if d.repoCache == nil {
 			http.Error(w, "repo cache not initialized", http.StatusInternalServerError)
 			return

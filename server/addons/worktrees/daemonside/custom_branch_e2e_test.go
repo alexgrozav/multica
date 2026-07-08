@@ -129,6 +129,42 @@ func TestCustomBranchFromRemoteTracking(t *testing.T) {
 	}
 }
 
+// Setup/run scripts see the resolved issue branch in their environment, so a
+// multica.json script can target the branch without parsing git state.
+func TestScriptEnvCarriesIssueBranch(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	origin := initOriginRepo(t, `{"scripts":{"setup":"echo $MULTICA_ISSUE_BRANCH > branch-env.txt"}}`)
+
+	fake := newFakeServer()
+	defer fake.srv.Close()
+
+	root := t.TempDir()
+	m := New(Deps{
+		ServerBaseURL:  fake.srv.URL,
+		WorkspacesRoot: root,
+		DaemonID:       "daemon-env",
+		TokenProvider:  func() string { return "test-token" },
+	})
+
+	const ws = "ws-env"
+	const issue = "dddd1111-2222-3333-4444-555555555555"
+	m.handleInit(context.Background(), shared.Job{
+		Kind: shared.JobInit, WorktreeID: "wt-env", IssueID: issue, Identifier: "PRO-12",
+		Branch: "feature/env-visible", WorkspaceID: ws, RepoURL: origin, SetupTaskID: "setup-env-1",
+	})
+
+	wtPath := filepath.Join(root, ws, "worktrees", shortID(issue), repoName(origin))
+	got, err := os.ReadFile(filepath.Join(wtPath, "branch-env.txt"))
+	if err != nil {
+		t.Fatalf("setup script did not run: %v", err)
+	}
+	if strings.TrimSpace(string(got)) != "feature/env-visible" {
+		t.Fatalf("MULTICA_ISSUE_BRANCH in setup env = %q, want feature/env-visible", strings.TrimSpace(string(got)))
+	}
+}
+
 // TestCustomBranchCreatedWhenMissing: a requested branch that exists nowhere is
 // created from base (origin's default branch head).
 func TestCustomBranchCreatedWhenMissing(t *testing.T) {

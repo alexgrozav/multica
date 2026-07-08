@@ -70,6 +70,11 @@ type IssueCreateParams struct {
 	// Stage groups this issue into an ordered barrier group under its parent
 	// (NULL = unstaged). See issue_child_done.go for the staged-barrier wake.
 	Stage pgtype.Int4
+	// BranchName is the custom git branch the issue's worktrees check out
+	// (reused if it already exists, created from the default branch otherwise).
+	// Empty keeps the identifier-derived default (e.g. PRO-11). Set once at
+	// create; callers validate the ref format (util.ValidateGitBranchName).
+	BranchName string
 }
 
 // IssueCreateOpts groups optional knobs for IssueService.Create. Most
@@ -243,6 +248,7 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 			OriginType:    p.OriginType,
 			OriginID:      p.OriginID,
 			Stage:         p.Stage,
+			BranchName:    p.BranchName,
 		})
 	} else {
 		issue, err = qtx.CreateIssue(ctx, db.CreateIssueParams{
@@ -262,6 +268,7 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 			Number:        issueNumber,
 			ProjectID:     projectID,
 			Stage:         p.Stage,
+			BranchName:    p.BranchName,
 		})
 	}
 	if err != nil {

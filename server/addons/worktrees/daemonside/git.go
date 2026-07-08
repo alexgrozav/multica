@@ -94,9 +94,23 @@ func resolveBaseRef(bare string) string {
 	return "HEAD"
 }
 
+// refExists reports whether a fully-qualified ref resolves in the bare repo.
+func refExists(bare, ref string) bool {
+	_, err := runGit(bare, "rev-parse", "--verify", "--quiet", ref)
+	return err == nil
+}
+
 // ensureWorktree creates the persistent worktree if absent (reusing an existing
 // one as-is) and returns the branch name.
-func ensureWorktree(bare, worktreePath, branch string) (string, error) {
+//
+// reuseExisting selects the semantics for the branch itself and is true for a
+// USER-REQUESTED branch name (issue.branch_name): an existing local branch is
+// checked out as-is (never reset — it may carry work), an existing remote
+// branch seeds a new local one, and only a branch that exists nowhere is
+// created from base. Derived identifier branches (reuseExisting=false) keep the
+// historical `-B` force-reset: a leftover branch from an earlier lifetime of
+// the same identifier restarts from base.
+func ensureWorktree(bare, worktreePath, branch string, reuseExisting bool) (string, error) {
 	if isWorktree(worktreePath) {
 		return branch, nil
 	}
@@ -105,21 +119,41 @@ func ensureWorktree(bare, worktreePath, branch string) (string, error) {
 	}
 	// Clear any half-registered worktree admin entry left by a prior failed add.
 	_, _ = runGit(bare, "worktree", "prune")
-	base := resolveBaseRef(bare)
-	// branch.autoSetupMerge=false: the issue/* branch must NOT track origin/<base>.
-	// Writing upstream config is both wrong here (an issue branch shouldn't push
-	// to main) and the operation that contended on config.lock when the daemon's
-	// agent-task worktree creation ran on the same bare repo concurrently.
-	if out, err := runGit(bare, "-c", "branch.autoSetupMerge=false", "worktree", "add", "-B", branch, worktreePath, base); err != nil {
+	// branch.autoSetupMerge=false: the issue branch must NOT track its start
+	// point. Writing upstream config is both wrong here (an issue branch
+	// shouldn't push to main) and the operation that contended on config.lock
+	// when the daemon's agent-task worktree creation ran on the same bare repo
+	// concurrently.
+	args := []string{"-c", "branch.autoSetupMerge=false", "worktree", "add"}
+	switch {
+	case reuseExisting && refExists(bare, "refs/heads/"+branch):
+		// Existing local branch: check it out where it stands.
+		args = append(args, worktreePath, branch)
+	case reuseExisting && refExists(bare, "refs/remotes/origin/"+branch):
+		// Branch exists on the remote only: continue it locally from there.
+		args = append(args, "-b", branch, worktreePath, "refs/remotes/origin/"+branch)
+	case reuseExisting:
+		// Nowhere yet: create it from base. -b (not -B) so a concurrent creation
+		// of the same user branch fails loudly instead of silently resetting it.
+		args = append(args, "-b", branch, worktreePath, resolveBaseRef(bare))
+	default:
+		args = append(args, "-B", branch, worktreePath, resolveBaseRef(bare))
+	}
+	if out, err := runGit(bare, args...); err != nil {
 		return "", fmt.Errorf("git worktree add: %s: %w", strings.TrimSpace(out), err)
 	}
 	return branch, nil
 }
 
-// removeWorktree tears down a persistent worktree and its branch (best-effort).
-func removeWorktree(bare, worktreePath, branch string) {
+// removeWorktree tears down a persistent worktree (best-effort). deleteBranch
+// is true for derived identifier branches, which die with the issue; a
+// user-requested branch (issue.branch_name) outlives its issues — it may
+// pre-date the issue, be shared, or be picked up again later — so it is kept.
+func removeWorktree(bare, worktreePath, branch string, deleteBranch bool) {
 	_, _ = runGit(bare, "worktree", "remove", "--force", worktreePath)
 	_, _ = runGit(bare, "worktree", "prune")
-	_, _ = runGit(bare, "branch", "-D", branch)
+	if deleteBranch {
+		_, _ = runGit(bare, "branch", "-D", branch)
+	}
 	_ = os.RemoveAll(worktreePath)
 }

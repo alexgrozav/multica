@@ -40,6 +40,7 @@ const mockDraftStore = {
     assigneeId: undefined as string | undefined,
     startDate: null,
     dueDate: null,
+    branchName: "",
     labelIds: [] as string[],
     attachments: [] as Array<{
       id: string;
@@ -259,6 +260,31 @@ vi.mock("../issues/components", () => ({
     />
   ),
   LabelPicker: () => <div data-testid="label-picker" />,
+  // Functional stub: surfaces the commit callback the way the real picker
+  // does (typed value, committed once) so the modal's submit wiring can be
+  // asserted; the real input semantics live in branch-picker.test.tsx.
+  BranchPicker: ({
+    branchName,
+    onBranchNameChange,
+    open,
+    onOpenChange,
+  }: {
+    branchName: string;
+    onBranchNameChange: (v: string) => void;
+    open?: boolean;
+    onOpenChange?: (v: boolean) => void;
+  }) => (
+    <div data-testid="branch-picker" data-open={open ? "true" : "false"}>
+      <input
+        aria-label="Branch"
+        defaultValue={branchName}
+        onBlur={(e) => {
+          onBranchNameChange(e.target.value.trim());
+          onOpenChange?.(false);
+        }}
+      />
+    </div>
+  ),
 }));
 
 vi.mock("../projects/components/project-picker", () => ({
@@ -381,6 +407,7 @@ describe("CreateIssueModal", () => {
     mockDraftStore.draft.assigneeId = undefined;
     mockDraftStore.draft.startDate = null;
     mockDraftStore.draft.dueDate = null;
+    mockDraftStore.draft.branchName = "";
     mockDraftStore.draft.labelIds = [];
     mockDraftStore.draft.attachments = [];
     mockSetDraft.mockImplementation((patch: Partial<typeof mockDraftStore.draft>) => {
@@ -396,6 +423,7 @@ describe("CreateIssueModal", () => {
         assigneeId: mockDraftStore.lastAssigneeId,
         startDate: null,
         dueDate: null,
+        branchName: "",
         labelIds: [],
         attachments: [],
       };
@@ -515,6 +543,33 @@ describe("CreateIssueModal", () => {
       dueDate: null,
       labelIds: [],
       attachments: [],
+      branchName: "",
+    });
+  });
+
+  it("sends the custom branch typed via the overflow menu on create", async () => {
+    const user = userEvent.setup();
+
+    renderModal(<CreateIssueModal onClose={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: "More options" }));
+    await user.click(await screen.findByText("Set branch..."));
+    const input = await screen.findByLabelText("Branch");
+    await user.type(input, "  feature/custom-checkout  ");
+    await user.tab();
+
+    fireEvent.change(screen.getByPlaceholderText("Issue title"), {
+      target: { value: "Issue on a custom branch" },
+    });
+    await user.click(screen.getByRole("button", { name: "Create Issue" }));
+
+    await waitFor(() => {
+      expect(mockCreateIssue).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "Issue on a custom branch",
+          branch_name: "feature/custom-checkout",
+        }),
+      );
     });
   });
 

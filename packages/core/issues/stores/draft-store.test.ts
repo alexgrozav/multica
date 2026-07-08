@@ -36,6 +36,7 @@ const RESET_STATE = {
     dueDate: null,
     labelIds: [],
     attachments: [],
+    branchName: "",
   },
   lastAssigneeType: undefined,
   lastAssigneeId: undefined,

@@ -184,8 +184,9 @@ func (m *Module) cancelRunsFor(worktreeID string) {
 }
 
 // handleInit is the SINGLE owner of a per-issue worktree's checkout + first
-// setup: create the worktree on the identifier branch, read multica.json, run
-// Setup once, and report the discovered scripts up so the UI can render them.
+// setup: create the worktree on the issue's branch (the user-requested one
+// when set, else the identifier default), read multica.json, run Setup once,
+// and report the discovered scripts up so the UI can render them.
 func (m *Module) handleInit(ctx context.Context, job shared.Job) {
 	bare, err := m.barePath(job.WorkspaceID, job.RepoURL)
 	if err != nil {
@@ -210,7 +211,7 @@ func (m *Module) handleInit(ctx context.Context, job shared.Job) {
 	// tolerate parallel mutation on the same bare clone.
 	var actualBranch string
 	if err := m.withRepoLock(bare, func() error {
-		b, e := ensureWorktree(bare, wtPath, m.branchName(job))
+		b, e := ensureWorktree(bare, wtPath, m.branchName(job), job.Branch != "")
 		actualBranch = b
 		return e
 	}); err != nil {
@@ -378,7 +379,9 @@ func (m *Module) handleCleanup(ctx context.Context, job shared.Job) {
 	}
 	if bare, err := m.barePath(job.WorkspaceID, job.RepoURL); err == nil {
 		_ = m.withRepoLock(bare, func() error {
-			removeWorktree(bare, wtPath, m.branchName(job))
+			// Derived identifier branches die with the issue; a user-requested
+			// branch (job.Branch) is kept — it may pre-exist or be shared.
+			removeWorktree(bare, wtPath, m.branchName(job), job.Branch == "")
 			return nil
 		})
 	} else {
@@ -446,7 +449,12 @@ func (m *Module) worktreePath(job shared.Job) string {
 	return IssueWorktreePath(m.deps.WorkspacesRoot, job.WorkspaceID, job.IssueID, job.RepoURL)
 }
 
+// branchName resolves the branch a job's worktree lives on: the user-requested
+// branch when the issue pinned one, else the identifier-derived default.
 func (m *Module) branchName(job shared.Job) string {
+	if job.Branch != "" {
+		return job.Branch
+	}
 	return IssueBranch(job.Identifier, job.IssueID)
 }
 

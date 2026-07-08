@@ -17,6 +17,11 @@ export interface CreateIssueRequest {
   start_date?: string;
   due_date?: string;
   attachment_ids?: string[];
+  /** Custom git branch the issue's worktrees check out: reused if it already
+   *  exists (locally or on the remote), created from the default branch
+   *  otherwise. Omit to derive from the issue identifier (e.g. PRO-11).
+   *  Immutable after create. */
+  branch_name?: string;
 }
 
 export interface UpdateIssueRequest {

@@ -12,7 +12,8 @@ import (
 //
 // The DIRECTORY is keyed by the issue UUID (stable, collision-free) so the
 // daemon's WorkDirOverride needs no identifier plumbing; the BRANCH is named
-// after the human identifier (e.g. PRO-11) per the product requirement.
+// after the human identifier (e.g. PRO-11) per the product requirement, unless
+// the issue pinned a custom branch at create (Job.Branch), which wins.
 
 // IssueWorktreeParent is the per-issue directory that holds one <repo> worktree
 // subdir per repo. In the unified model this IS the agent task's working
@@ -62,7 +63,9 @@ func IsWorktree(path string) bool { return isWorktree(path) }
 // EnsureWorktreeAt creates (or reuses, without resetting) the per-issue worktree
 // at worktreePath on the given branch from the bare clone. Exported so a caller
 // outside the poll loop can create the worktree identically (same path, same
-// branch, idempotent).
-func EnsureWorktreeAt(bare, worktreePath, branch string) (string, error) {
-	return ensureWorktree(bare, worktreePath, branch)
+// branch, idempotent). reuseExisting must be true when branch is a
+// user-requested name (existing local/remote branch is continued, never reset)
+// and false for derived identifier branches (leftovers restart from base).
+func EnsureWorktreeAt(bare, worktreePath, branch string, reuseExisting bool) (string, error) {
+	return ensureWorktree(bare, worktreePath, branch, reuseExisting)
 }

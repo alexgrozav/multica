@@ -174,7 +174,7 @@
     "section_details": "세부 정보",
     "section_token_usage": "토큰 사용량",
     "pull_requests_loading": "불러오는 중...",
-    "pull_requests_empty": "아직 연결된 Pull request가 없습니다. PR 브랜치 이름, 제목 또는 본문에 이 이슈 식별자를 넣으면 자동으로 연결됩니다.",
+    "pull_requests_empty": "아직 연결된 Pull request가 없습니다. PR 브랜치 이름, 제목 또는 본문에 이 이슈 식별자를 넣거나 이 이슈의 브랜치에서 PR을 열면 자동으로 연결됩니다.",
     "pull_request_state_open": "열림",
     "pull_request_state_draft": "초안",
     "pull_request_state_merged": "병합됨",
@@ -451,6 +451,12 @@
       "manage_dialog_title": "라벨 관리",
       "create_action": "만들기",
       "create_failed": "라벨을 만들지 못했습니다"
+    },
+    "branch": {
+      "trigger_label": "브랜치",
+      "placeholder": "예: feature/login",
+      "hint": "이 이슈의 worktree가 이 브랜치를 체크아웃합니다. 브랜치가 있으면 재사용하고, 없으면 기본 브랜치에서 생성합니다.",
+      "clear_action": "브랜치 지우기"
     }
   },
   "labels_panel": {

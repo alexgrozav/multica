@@ -74,15 +74,24 @@ INSERT INTO issue (
     workspace_id, title, description, status, priority,
     assignee_type, assignee_id, creator_type, creator_id,
     parent_issue_id, position, start_date, due_date, number, project_id,
-    stage
+    stage, branch_name
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-    sqlc.narg('stage')
+    sqlc.narg('stage'), sqlc.arg('branch_name')
 ) RETURNING *;
 
 -- name: GetIssueByNumber :one
 SELECT * FROM issue
 WHERE workspace_id = $1 AND number = $2;
+
+-- name: ListIssuesByBranchName :many
+-- Issues that pinned this exact git branch at create (custom worktree branch;
+-- an unset/empty branch_name never matches — callers pass a non-empty head
+-- ref). Used by the GitHub webhook to auto-link a PR whose head branch IS an
+-- issue's branch even when no identifier appears anywhere in the PR text.
+SELECT * FROM issue
+WHERE workspace_id = $1 AND branch_name = $2 AND branch_name <> ''
+ORDER BY created_at ASC;
 
 -- name: UpdateIssue :one
 UPDATE issue SET
@@ -115,10 +124,10 @@ INSERT INTO issue (
     workspace_id, title, description, status, priority,
     assignee_type, assignee_id, creator_type, creator_id,
     parent_issue_id, position, start_date, due_date, number, project_id,
-    origin_type, origin_id, stage
+    origin_type, origin_id, stage, branch_name
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-    sqlc.narg('origin_type'), sqlc.narg('origin_id'), sqlc.narg('stage')
+    sqlc.narg('origin_type'), sqlc.narg('origin_id'), sqlc.narg('stage'), sqlc.arg('branch_name')
 ) RETURNING *;
 
 -- name: LockIssueDuplicateKey :exec

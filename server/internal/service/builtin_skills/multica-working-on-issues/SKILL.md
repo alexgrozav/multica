@@ -27,9 +27,16 @@ This is the link that `multica issue pull-requests` reads back — but see the
 reference-only rule below: a key that appears **only** as a bare mention in the
 body is linked yet hidden from that list.
 
+A PR also links **by branch identity**: when its head branch exactly equals an
+issue's custom branch (`issue create --branch`), it links to that issue with no
+key anywhere in the PR — shown in the list, never close intent. This works in
+both orders: PR first, issue created onto the branch later (links backfill at
+create), or issue first, PR opened from its branch later.
+
 ```text
 MUL-2759: add built-in issue working skill        # title prefix → links, shown
 agent/matt/mul-2759-working-on-issues             # branch ref   → links, shown
+head == issue's custom branch (feature/login)     # branch match → links, shown
 ```
 
 **Close intent** is stricter and is a separate scan over **title or body only —
@@ -215,6 +222,25 @@ multica issue status <stage-2-child-id> todo   # promote when its deps are met
 Read each sub-issue's description before promoting and only promote items whose
 stated dependencies are met; if a description conflicts with the parent's
 breakdown, leave it `backlog` and comment to confirm first.
+
+### Custom branch: pin the checkout instead of the identifier default
+
+By default each issue's worktrees are checked out on a fresh branch named after
+the identifier (e.g. `MUL-123`). `--branch <name>` (API: `branch_name`, create
+only, immutable afterwards) pins a specific git branch instead: an existing
+branch — local or on the remote — is checked out **as-is**, and only a branch
+that exists nowhere is created from the default branch. Use it when a sub-issue
+must continue its parent's branch rather than start a new one:
+
+```bash
+multica issue create --title "Step 2: wire the API" --parent <issue-id> --assignee <agent> --branch feature/checkout-flow
+```
+
+Two contracts differ from identifier branches: a custom branch is never
+force-reset to base on checkout, and it is **kept** (not deleted) when the
+issue closes. Invalid ref names are rejected at create with a 400. PRs whose
+head is the custom branch auto-link to the issue by branch identity — no issue
+key needed in the PR (see the Linking section above).
 
 ## Incorrect → correct
 

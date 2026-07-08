@@ -51,8 +51,11 @@ type IssueResponse struct {
 	Stage     *int32  `json:"stage"`
 	StartDate *string `json:"start_date"`
 	DueDate   *string `json:"due_date"`
-	CreatedAt string  `json:"created_at"`
-	UpdatedAt string  `json:"updated_at"`
+	// BranchName is the custom git branch this issue's worktrees check out
+	// (empty = derive from the identifier). Set once at create.
+	BranchName string `json:"branch_name"`
+	CreatedAt  string `json:"created_at"`
+	UpdatedAt  string `json:"updated_at"`
 	// Metadata is the per-issue KV map (see issue_metadata.go). Always emitted
 	// (empty object when unset) so frontend code can `issue.metadata[key]`
 	// without nil-guarding the parent field.
@@ -106,6 +109,7 @@ func issueToResponse(i db.Issue, issuePrefix string) IssueResponse {
 		Stage:         int4ToPtr(i.Stage),
 		StartDate:     dateToPtr(i.StartDate),
 		DueDate:       dateToPtr(i.DueDate),
+		BranchName:    i.BranchName,
 		CreatedAt:     timestampToString(i.CreatedAt),
 		UpdatedAt:     timestampToString(i.UpdatedAt),
 		Metadata:      parseIssueMetadata(i.Metadata),
@@ -2100,6 +2104,11 @@ type CreateIssueRequest struct {
 	StartDate     *string  `json:"start_date"`
 	DueDate       *string  `json:"due_date"`
 	AttachmentIDs []string `json:"attachment_ids,omitempty"`
+	// BranchName pins the git branch the issue's worktrees check out: an
+	// existing branch (local or remote) is reused as-is, a new one is created
+	// from the default branch. Empty keeps the identifier-derived default
+	// (e.g. PRO-11). Immutable after create.
+	BranchName *string `json:"branch_name,omitempty"`
 	// OriginType / OriginID stamp the new issue with its provenance so
 	// platform-internal flows can deterministically locate it later. Only
 	// trusted callers should set these — currently the daemon CLI passes
@@ -2156,6 +2165,17 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 	if req.Stage != nil && *req.Stage < 1 {
 		writeError(w, http.StatusBadRequest, "stage must be >= 1")
 		return
+	}
+
+	branchName := ""
+	if req.BranchName != nil {
+		branchName = strings.TrimSpace(*req.BranchName)
+		if branchName != "" {
+			if err := util.ValidateGitBranchName(branchName); err != nil {
+				writeError(w, http.StatusBadRequest, "invalid branch_name: "+err.Error())
+				return
+			}
+		}
 	}
 
 	var assigneeType pgtype.Text
@@ -2294,6 +2314,7 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 		OriginType:     originType,
 		OriginID:       originID,
 		Stage:          ptrToInt4(req.Stage),
+		BranchName:     branchName,
 		AttachmentIDs:  attachmentIDs,
 		AllowDuplicate: req.AllowDuplicate,
 	}, service.IssueCreateOpts{
@@ -2333,6 +2354,11 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 
 	issue := res.Issue
 	slog.Info("issue created", append(logger.RequestAttrs(r), "issue_id", uuidToString(issue.ID), "title", issue.Title, "status", issue.Status, "workspace_id", workspaceID)...)
+
+	// An issue pinned to a custom branch adopts that branch's existing PRs:
+	// backfill links to already-mirrored PRs now (the webhook only links on PR
+	// events), so the issue's PR section is populated immediately.
+	h.linkPullRequestsForIssueBranch(r.Context(), issue)
 
 	resp := issueToResponse(issue, prefix)
 	resp.Attachments = buildAttachmentResponses(res.Attachments)

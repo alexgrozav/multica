@@ -151,6 +151,19 @@ wakes the parent assignee. Promoting the next stage's `backlog` sub-issues to
 `--value` is JSON-parsed by default (bool/number sniff); `--type` forces
 `string`/`number`/`bool`.
 
+## Custom branch (`--branch` / `branch_name`)
+
+| Behavior | File:line |
+|---|---|
+| `--branch` on `issue create` → `branch_name` in the create body | `server/cmd/multica/cmd_issue.go:356,915` |
+| `issue.branch_name` column (create-only, `''` = identifier default) | `server/migrations/145_issue_branch_name.up.sql` |
+| Invalid ref names rejected with 400 at create | `server/internal/handler/issue.go:2175` (`util.ValidateGitBranchName`, `server/internal/util/gitref.go:22`) |
+| Copied onto worktree rows → carried on daemon jobs as `Job.Branch` | `server/addons/worktrees/serverside/store.go:170` |
+| Reuse-or-create checkout: existing local branch as-is → remote branch continued → else created from base | `server/addons/worktrees/daemonside/git.go:113,129,132` |
+| Custom branch kept (not `-D`'d) on issue-close cleanup | `server/addons/worktrees/daemonside/git.go:152`; `loop.go:383` |
+| Webhook links a PR to issues whose `branch_name` == PR head ref (qualifying, no close intent) | `server/internal/handler/github.go:924` (folds into the identifier link loop) |
+| Issue-create backfill links already-mirrored PRs on the pinned branch | `server/internal/handler/github.go:1442` (`linkPullRequestsForIssueBranch`), called from `issue.go:2361` |
+
 ## Verification command
 
 Re-derive any line above before depending on it:
@@ -164,4 +177,7 @@ grep -n 'extractIdentifiers(\|extractClosingIdentifiers(\|derivePRState(' intern
 grep -n 'qualifyingIdents\|reference_only\|ReferenceOnly' internal/handler/github.go pkg/db/queries/github.sql
 grep -n 'prevIssue.Status == "backlog"\|func (h \*Handler) shouldEnqueueAgentTask' internal/handler/issue.go
 grep -n 'func notifyParentOfChildDone'       internal/handler/issue_child_done.go
+grep -n 'String("branch"\|invalid branch_name\|func ValidateGitBranchName' cmd/multica/cmd_issue.go internal/handler/issue.go internal/util/gitref.go
+grep -n 'func ensureWorktree\|func removeWorktree\|requested_branch' addons/worktrees/daemonside/git.go addons/worktrees/serverside/store.go
+grep -n 'ListIssuesByBranchName\|linkPullRequestsForIssueBranch' internal/handler/github.go internal/handler/issue.go
 ```

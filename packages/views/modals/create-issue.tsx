@@ -12,6 +12,7 @@ import {
   CalendarDays,
   Check,
   ChevronRight,
+  GitBranch,
   Maximize2,
   Minimize2,
   MoreHorizontal,
@@ -36,7 +37,7 @@ import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@multi
 import { Button } from "@multica/ui/components/ui/button";
 import { Switch } from "@multica/ui/components/ui/switch";
 import { ContentEditor, type ContentEditorRef, TitleEditor, useFileDropZone, FileDropOverlay } from "../editor";
-import { StatusIcon, StatusPicker, PriorityPicker, StagePicker, AssigneePicker, StartDatePicker, DueDatePicker, LabelPicker } from "../issues/components";
+import { StatusIcon, StatusPicker, PriorityPicker, StagePicker, AssigneePicker, StartDatePicker, DueDatePicker, LabelPicker, BranchPicker } from "../issues/components";
 import { maxSiblingStage } from "../issues/components/pickers/stage-picker";
 import { ProjectPicker } from "../projects/components/project-picker";
 import { useIssueTriggerPreview } from "../issues/hooks/use-issue-trigger-preview";
@@ -247,6 +248,12 @@ export function ManualCreatePanel({
   // the ⋯ menu by default, mounted inline (as the popover anchor) only when it
   // has a value or the user just opened it from the menu.
   const [dueDatePickerOpen, setDueDatePickerOpen] = useState(false);
+  // Custom worktree branch — same overflow reveal pattern as the dates. ""
+  // means "derive from the issue identifier" (the default), so the pill only
+  // renders when a branch is set or the user just opened it from the ⋯ menu.
+  // Defaulted defensively: drafts persisted by older builds predate the field.
+  const [branchName, setBranchName] = useState<string>(draft.branchName ?? "");
+  const [branchPickerOpen, setBranchPickerOpen] = useState(false);
   // Children live as full Issue objects — the picker always returns the whole
   // object, and we never need to hydrate from an ID the way we do for parent.
   const [childIssues, setChildIssues] = useState<Issue[]>([]);
@@ -308,6 +315,7 @@ export function ManualCreatePanel({
   const updateStartDate = (v: string | null) => { setStartDate(v); setDraft({ startDate: v }); };
   const updateDueDate = (v: string | null) => { setDueDate(v); setDraft({ dueDate: v }); };
   const updateLabelIds = (ids: string[]) => { setLabelIds(ids); setDraft({ labelIds: ids }); };
+  const updateBranchName = (v: string) => { setBranchName(v); setDraft({ branchName: v }); };
 
   const createIssueMutation = useCreateIssue();
   const updateIssueMutation = useUpdateIssue();
@@ -323,6 +331,7 @@ export function ManualCreatePanel({
     setParentIssueId(undefined);
     setStage(null);
     setChildIssues([]);
+    setBranchName("");
     setDraft({
       title: "",
       description: "",
@@ -334,6 +343,7 @@ export function ManualCreatePanel({
       dueDate: null,
       labelIds: [],
       attachments: [],
+      branchName: "",
     });
     descEditorRef.current?.clearContent();
     setFormResetKey((key) => key + 1);
@@ -361,6 +371,7 @@ export function ManualCreatePanel({
         // Stage is only meaningful for a sub-issue (relative to its siblings).
         stage: parentIssueId && stage != null ? stage : undefined,
         project_id: projectId,
+        branch_name: branchName.trim() || undefined,
       });
 
       // Link queued children to the new parent. Deferred to after create
@@ -725,6 +736,20 @@ export function ManualCreatePanel({
                 />
               )}
 
+              {/* Branch — same overflow reveal rule as the dates. Sets the git
+                  branch the issue's worktrees check out; empty keeps the
+                  identifier-derived default. */}
+              {(branchName || branchPickerOpen) && (
+                <BranchPicker
+                  branchName={branchName}
+                  onBranchNameChange={updateBranchName}
+                  triggerRender={<PillButton />}
+                  align="start"
+                  open={branchPickerOpen}
+                  onOpenChange={setBranchPickerOpen}
+                />
+              )}
+
               {/* Parent chip — appears when parent is set.
                   Placed before the ⋯ so it wraps to a new line with ⋯ if
                   space is tight, but ⋯ always stays last in DOM order. */}
@@ -796,6 +821,12 @@ export function ManualCreatePanel({
                     <DropdownMenuItem onClick={() => setStartDatePickerOpen(true)}>
                       <CalendarClock className="h-3.5 w-3.5" />
                       {t(($) => $.create_issue.set_start_date)}
+                    </DropdownMenuItem>
+                  )}
+                  {!branchName && (
+                    <DropdownMenuItem onClick={() => setBranchPickerOpen(true)}>
+                      <GitBranch className="h-3.5 w-3.5" />
+                      {t(($) => $.create_issue.set_branch)}
                     </DropdownMenuItem>
                   )}
                   {parentIssueId && parentIssue ? (

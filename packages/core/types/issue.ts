@@ -57,6 +57,10 @@ export interface Issue {
   // + local formatting, which shifts the day by the viewer's offset.
   start_date: string | null;
   due_date: string | null;
+  // Custom git branch the issue's worktrees check out ("" = derived from the
+  // identifier). Set once at create; optional because list endpoints and
+  // older backends omit it.
+  branch_name?: string;
   metadata: IssueMetadata;
   reactions?: IssueReaction[];
   labels?: Label[];

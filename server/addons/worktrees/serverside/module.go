@@ -47,7 +47,8 @@ func (m *Module) bgCtx() (context.Context, context.CancelFunc) {
 
 // onIssueEvent drives the whole lifecycle off issue events (create + update):
 //   - assignment to an agent/squad in a workable status → check out one
-//     workspace (a worktree per repo, branched on the issue identifier).
+//     workspace (a worktree per repo, branched on the issue identifier or on
+//     the issue's custom branch_name when one was set at create).
 //   - close (done/cancelled) → queue cleanup (script + worktree removal).
 //
 // Both paths are idempotent, so re-firing on an unrelated edit is harmless — it

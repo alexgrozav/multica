@@ -18,6 +18,8 @@ interface IssueDraft {
    *  kept as a plain id list rather than full Label objects. */
   labelIds: string[];
   attachments: Attachment[];
+  /** Custom git branch for the issue's worktrees ("" = identifier default). */
+  branchName: string;
 }
 
 const EMPTY_DRAFT: IssueDraft = {
@@ -31,6 +33,7 @@ const EMPTY_DRAFT: IssueDraft = {
   dueDate: null,
   labelIds: [],
   attachments: [],
+  branchName: "",
 };
 
 interface IssueDraftStore {

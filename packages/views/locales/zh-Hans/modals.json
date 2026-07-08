@@ -173,6 +173,7 @@
     "parent_with_id": "父：{{identifier}}",
     "set_due_date": "设置截止日期...",
     "set_start_date": "设置开始日期...",
+    "set_branch": "设置分支...",
     "set_parent": "设置父 issue...",
     "add_subissue": "添加子 issue...",
     "remove_parent": "移除父级",

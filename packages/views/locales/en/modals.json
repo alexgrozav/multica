@@ -175,6 +175,7 @@
     "parent_with_id": "Parent: {{identifier}}",
     "set_due_date": "Set due date...",
     "set_start_date": "Set start date...",
+    "set_branch": "Set branch...",
     "set_parent": "Set parent issue...",
     "add_subissue": "Add sub-issue...",
     "remove_parent": "Remove parent",

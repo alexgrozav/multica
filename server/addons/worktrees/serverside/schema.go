@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS issue_worktree (
     owner_daemon_id  TEXT NOT NULL DEFAULT '',
     path             TEXT NOT NULL DEFAULT '',
     branch           TEXT NOT NULL DEFAULT '',
+    requested_branch TEXT NOT NULL DEFAULT '',
     status           TEXT NOT NULL DEFAULT 'pending',
     setup_status     TEXT NOT NULL DEFAULT 'none',
     setup_task_id    UUID,
@@ -42,6 +43,9 @@ ALTER TABLE issue_worktree ADD COLUMN IF NOT EXISTS setup_task_id UUID;
 ALTER TABLE issue_worktree ADD COLUMN IF NOT EXISTS has_setup BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE issue_worktree ADD COLUMN IF NOT EXISTS has_cleanup BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE issue_worktree ADD COLUMN IF NOT EXISTS pending_open TEXT NOT NULL DEFAULT '';
+-- requested_branch is the user-chosen branch from issue.branch_name, copied at
+-- row creation so daemon jobs carry it ('' = derive from the identifier).
+ALTER TABLE issue_worktree ADD COLUMN IF NOT EXISTS requested_branch TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_issue_worktree_pending_open ON issue_worktree(owner_daemon_id) WHERE pending_open <> '';
 
 -- Per-named-run state. A worktree exposes multiple run scripts (dev, start, …)

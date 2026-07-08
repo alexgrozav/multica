@@ -174,7 +174,7 @@
     "section_details": "詳細",
     "section_token_usage": "トークン使用量",
     "pull_requests_loading": "読み込み中...",
-    "pull_requests_empty": "まだリンクされた Pull request がありません。PR のブランチ名、タイトル、または本文にこのイシューの識別子を入れると、自動的にリンクされます。",
+    "pull_requests_empty": "まだリンクされた Pull request がありません。PR のブランチ名、タイトル、または本文にこのイシューの識別子を入れるか、このイシューのブランチから PR を作成すると、自動的にリンクされます。",
     "pull_request_state_open": "オープン",
     "pull_request_state_draft": "ドラフト",
     "pull_request_state_merged": "マージ済み",
@@ -451,6 +451,12 @@
       "manage_dialog_title": "ラベルを管理",
       "create_action": "作成",
       "create_failed": "ラベルを作成できませんでした"
+    },
+    "branch": {
+      "trigger_label": "ブランチ",
+      "placeholder": "例: feature/login",
+      "hint": "このイシューの worktree がこのブランチをチェックアウトします。既存なら再利用し、なければデフォルトブランチから作成します。",
+      "clear_action": "ブランチをクリア"
     }
   },
   "labels_panel": {

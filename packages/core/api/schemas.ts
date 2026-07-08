@@ -283,6 +283,8 @@ export const IssueSchema = z.object({
   stage: z.number().nullable().default(null),
   start_date: z.string().nullable(),
   due_date: z.string().nullable(),
+  // Custom worktree branch; list endpoints and older backends omit it.
+  branch_name: z.string().optional(),
   metadata: IssueMetadataSchema,
   reactions: z.array(z.unknown()).optional(),
   labels: z.array(z.unknown()).optional(),

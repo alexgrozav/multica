@@ -173,6 +173,7 @@
     "parent_with_id": "親: {{identifier}}",
     "set_due_date": "期限を設定...",
     "set_start_date": "開始日を設定...",
+    "set_branch": "ブランチを設定...",
     "set_parent": "親イシューを設定...",
     "add_subissue": "サブイシューを追加...",
     "remove_parent": "親を削除",

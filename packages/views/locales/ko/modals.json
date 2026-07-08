@@ -173,6 +173,7 @@
     "parent_with_id": "상위 이슈: {{identifier}}",
     "set_due_date": "마감일 설정...",
     "set_start_date": "시작일 설정...",
+    "set_branch": "브랜치 설정...",
     "set_parent": "상위 이슈 설정...",
     "add_subissue": "하위 이슈 추가...",
     "remove_parent": "상위 이슈 제거",

@@ -129,6 +129,15 @@ RETURNING *;
 SELECT * FROM github_pull_request
 WHERE workspace_id = $1 AND repo_owner = $2 AND repo_name = $3 AND pr_number = $4;
 
+-- name: ListPullRequestsByBranch :many
+-- Mirrored PRs whose head branch matches exactly. Used at issue-create time to
+-- backfill issue ↔ PR links when the new issue pins a custom branch_name that
+-- already has PRs — the webhook only links on PR events, so without this a
+-- pre-existing PR would stay unlinked until its next webhook delivery.
+SELECT * FROM github_pull_request
+WHERE workspace_id = $1 AND branch = sqlc.arg('branch')
+ORDER BY pr_created_at ASC;
+
 -- name: ListPullRequestsByIssue :many
 -- Returns the issue's linked PRs with the aggregated check-suite counts for
 -- the PR's CURRENT head SHA. The `issue_prs` CTE narrows to this issue's PR

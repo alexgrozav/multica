@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -912,6 +913,29 @@ func (h *Handler) handlePullRequestEvent(ctx context.Context, body []byte) {
 		// the merge-time close decision.
 		preserveCloseIntent := p.Action != "closed" && (state == "merged" || state == "closed")
 		prefix := h.getIssuePrefix(ctx, wsID)
+		// An issue whose custom branch_name IS this PR's head branch links like
+		// an identifier-in-branch reference: qualifying (a working PR, never
+		// reference_only) but without close intent — branches don't declare
+		// close intent, only title/body keywords do. Folding the issue's
+		// identifier into idents/qualifyingIdents reuses the single link loop
+		// below, so flag merging (e.g. the same issue also keyword-declared in
+		// the body) stays in one place.
+		if headRef := strings.TrimSpace(p.PullRequest.Head.Ref); headRef != "" {
+			branchIssues, err := h.Queries.ListIssuesByBranchName(ctx, db.ListIssuesByBranchNameParams{
+				WorkspaceID: wsID,
+				BranchName:  headRef,
+			})
+			if err != nil {
+				slog.Warn("github: lookup issues by branch failed", "err", err)
+			}
+			for _, bi := range branchIssues {
+				ident := prefix + "-" + strconv.Itoa(int(bi.Number))
+				qualifyingIdents[ident] = struct{}{}
+				if !slices.Contains(idents, ident) {
+					idents = append(idents, ident)
+				}
+			}
+		}
 		// reevalIssues collects each issue whose link row we just touched so
 		// we can re-run the auto-advance gate against the persisted aggregate
 		// after every link upsert in this event. Driving the gate off
@@ -1406,6 +1430,47 @@ func (h *Handler) workspaceAutoLinkPRsEnabled(ctx context.Context, workspaceID p
 		return true
 	}
 	return *s.GitHubAutoLinkPRsEnabled
+}
+
+// linkPullRequestsForIssueBranch backfills issue ↔ PR links at issue-create
+// time for already-mirrored PRs whose head branch equals the new issue's
+// custom branch_name. The webhook only links on PR events, so a PR opened
+// BEFORE the issue existed would otherwise stay unlinked until its next
+// delivery. Links match the webhook's branch-match semantics: visible (not
+// reference_only) and without close intent. Best-effort — failures are
+// logged, never fail the create.
+func (h *Handler) linkPullRequestsForIssueBranch(ctx context.Context, issue db.Issue) {
+	if issue.BranchName == "" || !h.workspaceAutoLinkPRsEnabled(ctx, issue.WorkspaceID) {
+		return
+	}
+	prs, err := h.Queries.ListPullRequestsByBranch(ctx, db.ListPullRequestsByBranchParams{
+		WorkspaceID: issue.WorkspaceID,
+		Branch:      strToText(issue.BranchName),
+	})
+	if err != nil {
+		slog.Warn("github: list prs by branch failed", "err", err, "issue_id", uuidToString(issue.ID))
+		return
+	}
+	workspaceID := uuidToString(issue.WorkspaceID)
+	for _, pr := range prs {
+		if err := h.Queries.LinkIssueToPullRequest(ctx, db.LinkIssueToPullRequestParams{
+			IssueID:       issue.ID,
+			PullRequestID: pr.ID,
+			CloseIntent:   false,
+			ReferenceOnly: false,
+			LinkedByType:  strToText("system"),
+			LinkedByID:    pgtype.UUID{},
+		}); err != nil {
+			slog.Warn("github: backfill branch link failed", "err", err,
+				"issue_id", uuidToString(issue.ID), "pr_id", uuidToString(pr.ID))
+			continue
+		}
+		// Mirror the webhook's broadcast shape so any open PR views refetch.
+		h.publish(protocol.EventPullRequestUpdated, workspaceID, "system", "", map[string]any{
+			"pull_request":     githubPullRequestToResponse(pr),
+			"linked_issue_ids": []string{uuidToString(issue.ID)},
+		})
+	}
 }
 
 // the workspace's configured prefix and the number resolves to a real issue.

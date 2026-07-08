@@ -174,7 +174,7 @@
     "section_details": "详情",
     "section_token_usage": "Token 用量",
     "pull_requests_loading": "加载中…",
-    "pull_requests_empty": "还没有关联的 PR。在 PR 的分支名、标题或正文里引用本 issue 的 identifier 即可自动关联。",
+    "pull_requests_empty": "还没有关联的 PR。在 PR 的分支名、标题或正文里引用本 issue 的 identifier，或直接从本 issue 的分支发起 PR，即可自动关联。",
     "pull_request_state_open": "Open",
     "pull_request_state_draft": "Draft",
     "pull_request_state_merged": "Merged",
@@ -451,6 +451,12 @@
       "manage_dialog_title": "管理标签",
       "create_action": "创建",
       "create_failed": "创建标签失败"
+    },
+    "branch": {
+      "trigger_label": "分支",
+      "placeholder": "例如 feature/login",
+      "hint": "此 issue 的 worktree 会检出该分支：已存在则直接使用，否则从默认分支创建。",
+      "clear_action": "清除分支"
     }
   },
   "labels_panel": {

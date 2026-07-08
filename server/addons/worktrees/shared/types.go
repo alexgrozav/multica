@@ -250,6 +250,11 @@ type Job struct {
 	Identifier  string `json:"identifier,omitempty"` // human id (e.g. PRO-11) → branch name
 	WorkspaceID string `json:"workspace_id"`
 	RepoURL     string `json:"repo_url"`
+	// Branch is the user-requested branch name for the issue's worktrees
+	// (issue.branch_name). When set, the daemon checks it out — reusing an
+	// existing local/remote branch, creating it from base otherwise — and
+	// never deletes it on cleanup. Empty = derive from Identifier as before.
+	Branch      string `json:"branch,omitempty"`
 	ScriptName  string `json:"script_name,omitempty"` // named run/stop target
 	RunTaskID   string `json:"run_task_id,omitempty"`
 	SetupTaskID string `json:"setup_task_id,omitempty"`

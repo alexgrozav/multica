@@ -508,6 +508,7 @@ type Issue struct {
 	StartDate          pgtype.Date        `json:"start_date"`
 	Metadata           []byte             `json:"metadata"`
 	Stage              pgtype.Int4        `json:"stage"`
+	BranchName         string             `json:"branch_name"`
 }
 
 type IssueDependency struct {

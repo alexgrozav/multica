@@ -483,6 +483,65 @@ func (q *Queries) ListIssueIDsForPullRequest(ctx context.Context, pullRequestID 
 	return items, nil
 }
 
+const listPullRequestsByBranch = `-- name: ListPullRequestsByBranch :many
+SELECT id, workspace_id, installation_id, repo_owner, repo_name, pr_number, title, state, html_url, branch, author_login, author_avatar_url, merged_at, closed_at, pr_created_at, pr_updated_at, created_at, updated_at, head_sha, mergeable_state, additions, deletions, changed_files FROM github_pull_request
+WHERE workspace_id = $1 AND branch = $2
+ORDER BY pr_created_at ASC
+`
+
+type ListPullRequestsByBranchParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	Branch      pgtype.Text `json:"branch"`
+}
+
+// Mirrored PRs whose head branch matches exactly. Used at issue-create time to
+// backfill issue ↔ PR links when the new issue pins a custom branch_name that
+// already has PRs — the webhook only links on PR events, so without this a
+// pre-existing PR would stay unlinked until its next webhook delivery.
+func (q *Queries) ListPullRequestsByBranch(ctx context.Context, arg ListPullRequestsByBranchParams) ([]GithubPullRequest, error) {
+	rows, err := q.db.Query(ctx, listPullRequestsByBranch, arg.WorkspaceID, arg.Branch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []GithubPullRequest{}
+	for rows.Next() {
+		var i GithubPullRequest
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.InstallationID,
+			&i.RepoOwner,
+			&i.RepoName,
+			&i.PrNumber,
+			&i.Title,
+			&i.State,
+			&i.HtmlUrl,
+			&i.Branch,
+			&i.AuthorLogin,
+			&i.AuthorAvatarUrl,
+			&i.MergedAt,
+			&i.ClosedAt,
+			&i.PrCreatedAt,
+			&i.PrUpdatedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.HeadSha,
+			&i.MergeableState,
+			&i.Additions,
+			&i.Deletions,
+			&i.ChangedFiles,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listPullRequestsByIssue = `-- name: ListPullRequestsByIssue :many
 WITH issue_prs AS (
     SELECT pr.id, pr.head_sha

@@ -157,18 +157,23 @@ func (s *Store) WorkspaceRepoURLs(ctx context.Context, wsID string) ([]string, e
 // CreateWorktreeRow inserts a pending row (idempotent on issue+repo) and returns
 // it. The human identifier (e.g. PRO-11) is stamped so the daemon can name the
 // worktree branch after it; a later call backfills the identifier if it was
-// unknown at first insert.
+// unknown at first insert. The user-requested branch (issue.branch_name; empty
+// when unset or the issue row is unknown) is copied from the host issue row at
+// insert — read here rather than carried on the event so every checkout trigger
+// (create, later assignment, reopen, hydrated minimal payloads) sees it.
 func (s *Store) CreateWorktreeRow(ctx context.Context, issueID, identifier, wsID, repoURL string) (shared.Worktree, error) {
-	// ON CONFLICT backfills the identifier when it was unknown, AND re-arms a
-	// tombstoned ('removed') row back to a clean pending state — so reopening a
-	// previously-closed, still-assigned issue recreates its workspace. Live rows
-	// (any non-removed status) are left untouched.
+	// ON CONFLICT backfills the identifier / requested branch when they were
+	// unknown, AND re-arms a tombstoned ('removed') row back to a clean pending
+	// state — so reopening a previously-closed, still-assigned issue recreates
+	// its workspace. Live rows (any non-removed status) are left untouched.
 	if _, err := s.db.Exec(ctx,
-		`INSERT INTO issue_worktree (issue_id, issue_identifier, workspace_id, repo_url)
-		 VALUES ($1,$2,$3,$4)
+		`INSERT INTO issue_worktree (issue_id, issue_identifier, workspace_id, repo_url, requested_branch)
+		 VALUES ($1,$2,$3,$4, COALESCE((SELECT i.branch_name FROM issue i WHERE i.id=$1), ''))
 		 ON CONFLICT (issue_id, repo_url) DO UPDATE SET
 		   issue_identifier = CASE WHEN issue_worktree.issue_identifier='' AND EXCLUDED.issue_identifier<>''
 		                          THEN EXCLUDED.issue_identifier ELSE issue_worktree.issue_identifier END,
+		   requested_branch = CASE WHEN issue_worktree.status='removed' OR issue_worktree.requested_branch=''
+		                          THEN EXCLUDED.requested_branch ELSE issue_worktree.requested_branch END,
 		   status          = CASE WHEN issue_worktree.status='removed' THEN 'pending'   ELSE issue_worktree.status END,
 		   owner_daemon_id = CASE WHEN issue_worktree.status='removed' THEN ''          ELSE issue_worktree.owner_daemon_id END,
 		   setup_task_id   = CASE WHEN issue_worktree.status='removed' THEN NULL        ELSE issue_worktree.setup_task_id END,
@@ -507,7 +512,7 @@ func (s *Store) ClaimInitJobs(ctx context.Context, daemonID, wsID string) ([]sha
 		 UPDATE issue_worktree iw SET owner_daemon_id=$1, status='initializing',
 		        setup_task_id=gen_random_uuid(), updated_at=now()
 		 FROM claimed WHERE iw.id=claimed.id
-		 RETURNING iw.id::text, iw.issue_id::text, iw.issue_identifier, iw.repo_url, iw.setup_task_id::text`, daemonID, wsID)
+		 RETURNING iw.id::text, iw.issue_id::text, iw.issue_identifier, iw.requested_branch, iw.repo_url, iw.setup_task_id::text`, daemonID, wsID)
 	if err != nil {
 		return nil, err
 	}
@@ -515,7 +520,7 @@ func (s *Store) ClaimInitJobs(ctx context.Context, daemonID, wsID string) ([]sha
 	jobs := []shared.Job{}
 	for rows.Next() {
 		j := shared.Job{Kind: shared.JobInit, WorkspaceID: wsID}
-		if err := rows.Scan(&j.WorktreeID, &j.IssueID, &j.Identifier, &j.RepoURL, &j.SetupTaskID); err != nil {
+		if err := rows.Scan(&j.WorktreeID, &j.IssueID, &j.Identifier, &j.Branch, &j.RepoURL, &j.SetupTaskID); err != nil {
 			return nil, err
 		}
 		jobs = append(jobs, j)
@@ -534,7 +539,7 @@ func (s *Store) ClaimWorktreeActionJobs(ctx context.Context, daemonID string) ([
 		 )
 		 UPDATE issue_worktree iw SET pending_action='', updated_at=now()
 		 FROM claimed WHERE iw.id=claimed.id
-		 RETURNING iw.id::text, iw.issue_id::text, iw.issue_identifier, iw.workspace_id::text,
+		 RETURNING iw.id::text, iw.issue_id::text, iw.issue_identifier, iw.requested_branch, iw.workspace_id::text,
 		           iw.repo_url, iw.setup_task_id::text, claimed.act`,
 		daemonID)
 	if err != nil {
@@ -546,7 +551,7 @@ func (s *Store) ClaimWorktreeActionJobs(ctx context.Context, daemonID string) ([
 		var act string
 		var setupTaskID *string
 		j := shared.Job{}
-		if err := rows.Scan(&j.WorktreeID, &j.IssueID, &j.Identifier, &j.WorkspaceID, &j.RepoURL, &setupTaskID, &act); err != nil {
+		if err := rows.Scan(&j.WorktreeID, &j.IssueID, &j.Identifier, &j.Branch, &j.WorkspaceID, &j.RepoURL, &setupTaskID, &act); err != nil {
 			return nil, err
 		}
 		if setupTaskID != nil {

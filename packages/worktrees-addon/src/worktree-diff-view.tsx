@@ -1,16 +1,21 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { EditorState, Compartment } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { FileWarning, Loader2, RefreshCw } from "lucide-react";
 import { Button } from "@multica/ui/components/ui/button";
 import { cn } from "@multica/ui/lib/utils";
-import { useIssueWorktreeChanges, useWorktreeFileDiff } from "./queries";
+import { useCreateComment } from "@multica/core/issues/mutations";
+import { useIssueWorktreeChanges, useIssueWorktrees, useWorktreeFileDiff } from "./queries";
 import { useIssueFileTabs } from "./issue-file-tabs-context";
 import { buildDiffExtensions, languageExtensionFor } from "./codemirror-setup";
+import { diffCommentExtension, fenceLangFor, formatDiffComment } from "./diff-comment";
+import { DiffCommentForm } from "./diff-comment-form";
 import { FileModeToggle } from "./file-mode-toggle";
 import { fileTabLabel } from "./file-tab-state";
+import { repoLabel } from "./repo-label";
 
 // WorktreeDiffView is one diff tab's content: a toolbar (path, +/- counts,
 // Reload) over a read-only CodeMirror unified diff of the file against the
@@ -18,6 +23,10 @@ import { fileTabLabel } from "./file-tab-state";
 // round trip (~2s). The view is read-only, so unlike the editor it can always
 // follow the data: a WS-driven refetch (the agent kept working) rebuilds the
 // diff in place, keeping the scroll position.
+//
+// Hovering a line shows a "+" gutter button that opens an inline composer
+// (diff-comment.ts); submitting posts an issue comment quoting file, line,
+// and code above the body, addressed to the issue's conversation.
 export function WorktreeDiffView({
   issueId,
   worktreeId,
@@ -50,8 +59,45 @@ export function WorktreeDiffView({
   // captures it (React runs cleanup before the next body, so reading the old
   // view inside the body would always see a torn-down ref).
   const scrollTopRef = useRef(0);
+  const viewRef = useRef<EditorView | null>(null);
 
   const viewable = !isError && !!data && !data.binary && !data.truncated;
+
+  // --- Line comments ---
+  // The composer target (line + the code the user saw when clicking "+") and
+  // the draft live here rather than in editor state, so both survive the
+  // WS-driven editor rebuilds below.
+  const { mutateAsync: createComment, isPending: commentPending } = useCreateComment(issueId);
+  const { data: worktrees = [] } = useIssueWorktrees(issueId);
+  const [composerTarget, setComposerTarget] = useState<{ line: number; code: string } | null>(
+    null,
+  );
+  const [composerSlot, setComposerSlot] = useState<HTMLElement | null>(null);
+  const [draft, setDraft] = useState("");
+  const [commentError, setCommentError] = useState<string | null>(null);
+
+  const diffComment = useMemo(
+    () =>
+      diffCommentExtension({
+        onOpen: (line, code) => {
+          setCommentError(null);
+          setComposerTarget({ line, code });
+        },
+        onSlotMount: (el) => setComposerSlot(el),
+        // Guarded: when the composer moves lines the new slot can mount
+        // before the old one is destroyed.
+        onSlotUnmount: (el) => setComposerSlot((prev) => (prev === el ? null : prev)),
+      }),
+    [],
+  );
+
+  // Ref mirror for the (re)build effect below — the composer opening must not
+  // trigger a full editor rebuild. Declared before the build effect so the
+  // ref is current when a rebuild re-opens the composer.
+  const composerLineRef = useRef<number | null>(null);
+  useEffect(() => {
+    composerLineRef.current = composerTarget?.line ?? null;
+  }, [composerTarget]);
 
   // (Re)build the diff whenever fresh sides arrive. CodeMirror's unified merge
   // view takes `original` at creation, so an update is a rebuild — scroll is
@@ -65,9 +111,18 @@ export function WorktreeDiffView({
       parent,
       state: EditorState.create({
         doc: data.new_content,
-        extensions: buildDiffExtensions({ language, original: data.old_content }),
+        extensions: [
+          buildDiffExtensions({ language, original: data.old_content }),
+          diffComment.extension,
+        ],
       }),
     });
+    viewRef.current = view;
+    // Re-open the composer after a rebuild (fresh sides arrived while the
+    // user was typing); the draft lives in React state so nothing is lost.
+    if (composerLineRef.current != null) {
+      diffComment.setLine(view, composerLineRef.current, { scroll: false });
+    }
     view.scrollDOM.scrollTop = scrollTopRef.current;
     void languageExtensionFor(fileTabLabel(path)).then((ext) => {
       if (!cancelled && ext) view.dispatch({ effects: language.reconfigure(ext) });
@@ -75,9 +130,52 @@ export function WorktreeDiffView({
     return () => {
       cancelled = true;
       scrollTopRef.current = view.scrollDOM.scrollTop;
+      viewRef.current = null;
       view.destroy();
     };
-  }, [viewable, data, path]);
+  }, [viewable, data, path, diffComment]);
+
+  // Push composer open/close into the live view (rebuilds re-open above).
+  // Moving the composer to another line makes CodeMirror relocate the widget
+  // DOM, which drops focus from the textarea — restore it right after the
+  // dispatch (the slot node survives the move, so it can be queried here).
+  useEffect(() => {
+    const view = viewRef.current;
+    if (view) diffComment.setLine(view, composerTarget?.line ?? null);
+    if (composerTarget) composerSlot?.querySelector("textarea")?.focus();
+  }, [composerTarget, composerSlot, diffComment]);
+
+  const handleCancelComment = useCallback(() => {
+    setComposerTarget(null);
+    setDraft("");
+    setCommentError(null);
+  }, []);
+
+  const handleSubmitComment = useCallback(async () => {
+    const body = draft.trim();
+    if (!composerTarget || !body) return;
+    // Same repo-qualification convention as the tab titles: only multi-repo
+    // issues need the prefix to disambiguate the path.
+    const wt = worktrees.find((w) => w.id === worktreeId);
+    const location = worktrees.length > 1 && wt ? `${repoLabel(wt.repo_url)}/${path}` : path;
+    const content = formatDiffComment({
+      location,
+      line: composerTarget.line,
+      code: composerTarget.code,
+      lang: fenceLangFor(path),
+      body,
+    });
+    setCommentError(null);
+    try {
+      await createComment({ content });
+      setComposerTarget(null);
+      setDraft("");
+    } catch (err) {
+      setCommentError(
+        err instanceof Error && err.message ? err.message : "Failed to post the comment.",
+      );
+    }
+  }, [composerTarget, draft, worktrees, worktreeId, path, createComment]);
 
   const handleReload = useCallback(() => {
     void refetch();
@@ -147,6 +245,22 @@ export function WorktreeDiffView({
         )}
       </div>
       {body}
+      {composerSlot &&
+        composerTarget &&
+        createPortal(
+          <DiffCommentForm
+            value={draft}
+            onChange={(v) => {
+              setDraft(v);
+              if (commentError) setCommentError(null);
+            }}
+            onSubmit={() => void handleSubmitComment()}
+            onCancel={handleCancelComment}
+            submitting={commentPending}
+            error={commentError}
+          />,
+          composerSlot,
+        )}
     </div>
   );
 }

@@ -25,6 +25,13 @@ vi.mock("./queries", () => ({
     isRefetching: false,
   }),
   useIssueWorktreeChanges: () => ({ data: changeLists, isLoading: false }),
+  useIssueWorktrees: () => ({ data: [], isLoading: false }),
+}));
+
+// The line-comment composer posts through the host's comment mutation; the
+// hook needs a QueryClient, so it is stubbed out here.
+vi.mock("@multica/core/issues/mutations", () => ({
+  useCreateComment: () => ({ mutateAsync: vi.fn(), isPending: false }),
 }));
 
 import { WorktreeDiffView } from "./worktree-diff-view";

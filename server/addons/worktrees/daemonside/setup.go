@@ -75,10 +75,13 @@ func WaitIssueReady(ctx context.Context, p WaitParams) (managed bool, err error)
 }
 
 // RunSetupAt reads the worktree's multica.json and runs its Setup script in
-// place, for the legacy (unified-disabled) agent-checkout path. Returns ran=true
-// when a Setup command was defined; err is non-nil only when the script itself
-// fails (so the caller can fail the checkout).
-func RunSetupAt(ctx context.Context, workspaceID, repoURL, worktreePath string, onLine func(stream, text string)) (bool, error) {
+// place, for checkouts made outside the poll loop's handleInit: the legacy
+// (unified-disabled) agent checkout, the `multica repo checkout` handler, and
+// the unified model's machine-local ensure. Returns ran=true when a Setup
+// command was defined; err is non-nil only when the script itself fails (so
+// the caller can fail the checkout). extraEnv entries are appended after the
+// standard MULTICA_* variables (callers use it to add issue context).
+func RunSetupAt(ctx context.Context, workspaceID, repoURL, worktreePath string, onLine func(stream, text string), extraEnv ...string) (bool, error) {
 	mf, err := readManifest(worktreePath)
 	if err != nil {
 		return false, err
@@ -91,6 +94,7 @@ func RunSetupAt(ctx context.Context, workspaceID, repoURL, worktreePath string, 
 		"MULTICA_REPO_URL=" + repoURL,
 		"MULTICA_WORKTREE_PATH=" + worktreePath,
 	}
+	env = append(env, extraEnv...)
 	code, runErr := runScript(ctx, worktreePath, mf.Scripts.Setup, env, onLine)
 	if runErr != nil {
 		return true, runErr

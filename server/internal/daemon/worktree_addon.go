@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	worktreesdaemon "github.com/multica-ai/multica/server/addons/worktrees/daemonside"
@@ -64,18 +65,21 @@ func (d *Daemon) startWorktreeAddon(ctx context.Context) {
 }
 
 // runCheckoutSetup runs the repo's multica.json Setup script in a freshly
-// checked-out worktree (the LEGACY, unified-disabled path only), before the
-// checkout returns — so the agent waits and then works in a prepared
-// environment. Returns the captured output and an error only when the Setup
-// script itself fails (the caller fails the checkout). A missing/invalid
-// multica.json is treated as "no setup" so checkouts are never blocked.
-func (d *Daemon) runCheckoutSetup(ctx context.Context, workspaceID, repoURL, worktreePath string) (string, error) {
+// checked-out worktree, before the checkout returns — so the agent waits and
+// then works in a prepared environment. Used by every checkout made outside
+// the add-on poll loop's handleInit: the legacy (unified-disabled) eager
+// checkout, the `multica repo checkout` handler, and the unified model's
+// machine-local ensure. Returns the captured output and an error only when
+// the Setup script itself fails (the caller fails the checkout). A
+// missing/invalid multica.json is treated as "no setup" so checkouts are
+// never blocked.
+func (d *Daemon) runCheckoutSetup(ctx context.Context, workspaceID, repoURL, worktreePath string, extraEnv ...string) (string, error) {
 	var buf strings.Builder
 	ran, err := worktreesdaemon.RunSetupAt(ctx, workspaceID, repoURL, worktreePath, func(stream, text string) {
 		buf.WriteString(text)
 		buf.WriteByte('\n')
 		d.logger.Debug("checkout setup", "repo", repoURL, "stream", stream, "line", text)
-	})
+	}, extraEnv...)
 	if err != nil {
 		if !ran {
 			// Manifest read/parse failure — don't block the checkout; skip Setup.
@@ -92,10 +96,16 @@ func (d *Daemon) runCheckoutSetup(ctx context.Context, workspaceID, repoURL, wor
 
 // eagerCheckoutTaskRepos makes the agent task "wait until checkout is complete
 // before it starts working". In the unified model the add-on's poll loop
-// (handleInit) is the SINGLE owner of checkout + first Setup — kicked off the
-// moment the issue was assigned — so here the agent simply WAITS for that one
-// workspace to be ready and then adopts it. There is no second checkout and no
-// double Setup, which is what made the previous two-owner design misbehave.
+// (handleInit) is the SINGLE owner of the issue's authoritative checkout +
+// first Setup — kicked off the moment the issue was assigned — so here the
+// agent first WAITS for that workspace to be ready. But worktree rows are
+// global per (issue, repo) with ONE owner daemon, while disk state is
+// per-machine: "ready" may mean "checked out on ANOTHER machine" (issue
+// assigned to an agent on the studio, question later asked of an agent on the
+// laptop). So after the wait, ensure every task repo also exists as a LOCAL
+// worktree on the same issue branch — with Setup — before the agent starts;
+// on the owning machine that ensure is a no-op and the agent simply adopts
+// the one existing tree (no second checkout, no double Setup).
 //
 // Returns the first error so the caller fails the task before StartTask (the
 // agent never runs). No-op for local_directory tasks and when there is no repo
@@ -116,13 +126,13 @@ func (d *Daemon) eagerCheckoutTaskRepos(ctx context.Context, task Task, env *exe
 		if err != nil {
 			return fmt.Errorf("eager checkout: %w", err)
 		}
-		if managed {
-			return nil
+		if !managed {
+			// Not tracked by the add-on (e.g. a mention on an issue that was
+			// never assigned to an agent). The local ensure below still gives
+			// the agent the checked-out workspace its brief promises.
+			d.logger.Warn("worktrees: issue not managed by add-on; performing local checkout only", "issue", task.IssueID)
 		}
-		// Not tracked by the add-on (rare edge). Let the agent lazy-checkout into
-		// the per-issue dir itself rather than block the task.
-		d.logger.Warn("worktrees: issue not managed by add-on; skipping eager checkout", "issue", task.IssueID)
-		return nil
+		return d.ensureLocalIssueWorktrees(ctx, task, perIssueDir)
 	}
 
 	// Legacy path (unified disabled): fresh per-task workdir, agent/* branch, with
@@ -152,6 +162,86 @@ func (d *Daemon) eagerCheckoutTaskRepos(ctx context.Context, task Task, env *exe
 		}
 	}
 	return nil
+}
+
+// ensureLocalIssueWorktrees makes the issue's workspace real ON THIS MACHINE:
+// for every task repo whose per-issue worktree is missing locally, create it
+// on the issue branch and run its Setup script, before the agent launches.
+//
+// The branch semantics are those of a COLLABORATOR's checkout, never a reset:
+// an existing local branch is checked out as-is, a branch on origin is
+// continued from origin/<branch> (so work pushed from the owning machine is
+// visible here), and only a branch that exists nowhere is created from base —
+// when the two machines then both push, ordinary git non-fast-forward rules
+// reconcile them. That is exactly EnsureWorktreeAt's reuseExisting=true mode;
+// the owner-only force-reset (-B) mode is deliberately not used here.
+//
+// The created worktree is NOT reported to the server: the issue_worktree row
+// keeps its single owner daemon, whose checkout stays the authoritative one
+// for the sidebar (files, changes, terminals, open-in). This is purely the
+// task's working copy.
+func (d *Daemon) ensureLocalIssueWorktrees(ctx context.Context, task Task, perIssueDir string) error {
+	branch := strings.TrimSpace(task.IssueBranch)
+	if branch == "" {
+		// Old server: the claim payload predates issue_branch. Keep the prior
+		// behavior (wait only; the agent lazy-checks-out).
+		d.logger.Warn("worktrees: task carries no issue_branch; skipping local worktree ensure", "issue", task.IssueID)
+		return nil
+	}
+	// Serialize per issue dir so two tasks starting together on this machine
+	// create + Setup each repo exactly once (the loser of the race sees the
+	// worktree and skips).
+	mu := issueEnsureLock(perIssueDir)
+	mu.Lock()
+	defer mu.Unlock()
+	for _, repo := range task.Repos {
+		url := strings.TrimSpace(repo.URL)
+		if url == "" {
+			continue
+		}
+		wtPath := worktreesdaemon.IssueWorktreePath(d.cfg.WorkspacesRoot, task.WorkspaceID, task.IssueID, url)
+		if worktreesdaemon.IsWorktree(wtPath) {
+			continue // already on this machine (add-on owner here, or a prior task's ensure)
+		}
+		if err := d.ensureRepoReady(ctx, task.WorkspaceID, url); err != nil {
+			return fmt.Errorf("eager checkout: repo not ready %s: %w", url, err)
+		}
+		bare := d.repoCache.Lookup(task.WorkspaceID, url)
+		if bare == "" {
+			return fmt.Errorf("eager checkout: no cached clone for %s", url)
+		}
+		// Branch off CURRENT origin (same reasoning as handleInit): a stale
+		// cache would base the branch — or miss origin/<branch> entirely — and
+		// hide work pushed from the owning machine. Non-fatal: branch off what
+		// we have rather than block the task.
+		if ferr := d.repoCache.Fetch(bare); ferr != nil {
+			d.logger.Warn("worktrees: pre-ensure fetch failed; local worktree may branch off a stale base", "repo", url, "error", ferr)
+		}
+		if err := d.repoCache.WithRepoLock(bare, func() error {
+			_, e := worktreesdaemon.EnsureWorktreeAt(bare, wtPath, branch, true)
+			return e
+		}); err != nil {
+			return fmt.Errorf("eager checkout: create local worktree %s: %w", url, err)
+		}
+		d.logger.Info("worktrees: created machine-local issue worktree",
+			"issue", task.IssueID, "repo", url, "branch", branch, "path", wtPath)
+		if out, serr := d.runCheckoutSetup(ctx, task.WorkspaceID, url, wtPath,
+			"MULTICA_ISSUE_ID="+task.IssueID,
+			"MULTICA_ISSUE_BRANCH="+branch,
+		); serr != nil {
+			return fmt.Errorf("eager checkout: setup %s: %w\n%s", url, serr, out)
+		}
+	}
+	return nil
+}
+
+// issueEnsureLocks serializes ensureLocalIssueWorktrees per per-issue dir.
+// Package-level so the whole mechanism stays inside this add-on adapter file.
+var issueEnsureLocks sync.Map
+
+func issueEnsureLock(dir string) *sync.Mutex {
+	v, _ := issueEnsureLocks.LoadOrStore(dir, &sync.Mutex{})
+	return v.(*sync.Mutex)
 }
 
 // adoptManagedWorktree reports whether a `multica repo checkout` request

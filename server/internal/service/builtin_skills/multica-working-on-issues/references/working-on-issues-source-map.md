@@ -164,6 +164,7 @@ wakes the parent assignee. Promoting the next stage's `backlog` sub-issues to
 | Claim payload carries the resolved branch (`issue_branch`, shared derivation) | `server/internal/handler/daemon.go` (ClaimTaskByRuntime issue block); `server/addons/worktrees/shared/branch.go` (`IssueBranch`) |
 | Brief announces pre-checked-out repos + branch; `MULTICA_ISSUE_BRANCH` env | `server/internal/daemon/daemon.go` (`taskCtx.CheckedOutBranch`, `agentEnv`); `execenv/runtime_config.go` + `runtime_config_sections.go` (`writeRepositories`) |
 | `multica repo checkout` adopts a managed issue worktree (no reset, no agent/* branch) | `server/internal/daemon/worktree_addon.go` (`adoptManagedWorktree`); `health.go` (repoCheckoutHandler) |
+| Task's daemon ensures MACHINE-LOCAL worktrees before the agent starts (issue ready on another daemon → local checkout continued from `origin/<branch>` + Setup) | `server/internal/daemon/worktree_addon.go` (`eagerCheckoutTaskRepos`, `ensureLocalIssueWorktrees`) |
 | Webhook links a PR to issues whose `branch_name` == PR head ref (qualifying, no close intent) | `server/internal/handler/github.go:924` (folds into the identifier link loop) |
 | Issue-create backfill links already-mirrored PRs on the pinned branch | `server/internal/handler/github.go:1442` (`linkPullRequestsForIssueBranch`), called from `issue.go:2361` |
 

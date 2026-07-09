@@ -253,6 +253,13 @@ WHERE id = $1 AND issue_id IS NULL;
 -- run has not changed. The Composio overlay follows the agent's invocation
 -- permission and uses the agent owner's connection (MUL-3963); originator is
 -- carried for A2A/audit, not as an originator == agent.owner_id gate.
+--
+-- override_runtime_id reroutes the retry to a different runtime (the
+-- fallback-runtime path for runtime-shaped failures). NULL keeps the
+-- parent's runtime. When the override actually changes the runtime, the
+-- child must NOT inherit session_id/work_dir (CLI sessions and workdirs are
+-- machine-local) and force_fresh_session is set so the daemon skips every
+-- prior-state resume lookup on the new machine.
 INSERT INTO agent_task_queue (
     agent_id, runtime_id, issue_id, chat_session_id, autopilot_run_id,
     status, priority, trigger_comment_id, trigger_summary, context,
@@ -261,12 +268,19 @@ INSERT INTO agent_task_queue (
     squad_id, originator_user_id, runtime_mcp_overlay, runtime_connected_apps
 )
 SELECT
-    p.agent_id, p.runtime_id, p.issue_id, p.chat_session_id, p.autopilot_run_id,
+    p.agent_id,
+    COALESCE(sqlc.narg(override_runtime_id)::uuid, p.runtime_id),
+    p.issue_id, p.chat_session_id, p.autopilot_run_id,
     'queued', p.priority, p.trigger_comment_id, p.trigger_summary, p.context,
-    CASE WHEN p.failure_reason IS NOT DISTINCT FROM 'codex_semantic_inactivity' THEN NULL ELSE p.session_id END,
-    CASE WHEN p.failure_reason IS NOT DISTINCT FROM 'codex_semantic_inactivity' THEN NULL ELSE p.work_dir END,
+    CASE WHEN p.failure_reason IS NOT DISTINCT FROM 'codex_semantic_inactivity'
+           OR (sqlc.narg(override_runtime_id)::uuid IS NOT NULL AND sqlc.narg(override_runtime_id)::uuid IS DISTINCT FROM p.runtime_id)
+         THEN NULL ELSE p.session_id END,
+    CASE WHEN p.failure_reason IS NOT DISTINCT FROM 'codex_semantic_inactivity'
+           OR (sqlc.narg(override_runtime_id)::uuid IS NOT NULL AND sqlc.narg(override_runtime_id)::uuid IS DISTINCT FROM p.runtime_id)
+         THEN NULL ELSE p.work_dir END,
     p.attempt + 1, p.max_attempts, p.id,
-    p.failure_reason IS NOT DISTINCT FROM 'codex_semantic_inactivity',
+    (p.failure_reason IS NOT DISTINCT FROM 'codex_semantic_inactivity')
+      OR (sqlc.narg(override_runtime_id)::uuid IS NOT NULL AND sqlc.narg(override_runtime_id)::uuid IS DISTINCT FROM p.runtime_id),
     p.is_leader_task,
     p.squad_id,
     p.originator_user_id,
@@ -666,6 +680,55 @@ FROM victims v
 WHERE t.id = v.id
   AND t.status = 'queued'
   AND t.created_at < now() - make_interval(secs => @ttl_secs::double precision)
+RETURNING t.*;
+
+-- name: FailQueuedTasksForOfflineRuntimesWithFallback :many
+-- Reroute arm of the fallback-runtime feature: fails queued tasks whose
+-- pinned runtime is offline WHEN the agent has some other bound runtime
+-- (main or fallback) online to take the work. The failure_reason
+-- 'runtime_offline' is auto-retryable, so HandleFailedTasks immediately
+-- spawns a retry that re-resolves onto the online runtime — the visible
+-- effect is a reroute, not a failure.
+--
+-- Deliberately narrow so it can never make things worse than today's
+-- queue-and-wait behavior:
+--   * only tasks the auto-retry path will actually pick up: non-autopilot
+--     (autopilot owns its own re-run cadence), issue- or chat-linked
+--     (quick-create tasks are excluded), and with retry budget left;
+--   * agents whose candidates are ALL offline keep waiting untouched;
+--   * same FOR UPDATE SKIP LOCKED + re-check discipline as
+--     ExpireStaleQueuedTasks so a concurrent daemon claim wins the race.
+WITH victims AS (
+    SELECT t.id FROM agent_task_queue t
+    JOIN agent_runtime dead ON dead.id = t.runtime_id
+    WHERE t.status = 'queued'
+      AND dead.status = 'offline'
+      AND t.autopilot_run_id IS NULL
+      AND (t.issue_id IS NOT NULL OR t.chat_session_id IS NOT NULL)
+      AND t.attempt < t.max_attempts
+      AND EXISTS (
+          SELECT 1
+          FROM (
+              SELECT a.runtime_id FROM agent a WHERE a.id = t.agent_id
+              UNION ALL
+              SELECT afr.runtime_id FROM agent_fallback_runtime afr WHERE afr.agent_id = t.agent_id
+          ) cand
+          JOIN agent_runtime ar ON ar.id = cand.runtime_id
+          WHERE ar.status = 'online'
+      )
+    ORDER BY t.created_at ASC
+    LIMIT @max_per_tick::int
+    FOR UPDATE OF t SKIP LOCKED
+)
+UPDATE agent_task_queue t
+SET status = 'failed',
+    completed_at = now(),
+    error = 'runtime went offline',
+    failure_reason = 'runtime_offline',
+    prepare_lease_expires_at = NULL
+FROM victims v
+WHERE t.id = v.id
+  AND t.status = 'queued'
 RETURNING t.*;
 
 -- name: CancelAgentTask :one

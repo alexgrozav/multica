@@ -569,9 +569,18 @@ func (s *AutopilotService) dispatchRunOnly(ctx context.Context, ap db.Autopilot,
 		return &errDispatchSkipped{reason: formatAdmissionReason(ap, "creator cannot access private squad leader")}
 	}
 
+	// AgentReadiness above guarantees at least one bound runtime is online;
+	// resolve which one the task is pinned to (main first, then fallbacks).
+	// Scheduler context carries no current-computer hint, so this is pure
+	// bound-order resolution.
+	resolved, err := ResolveDispatchRuntime(ctx, s.Queries, agent.ID)
+	if err != nil {
+		return fmt.Errorf("resolve dispatch runtime: %w", err)
+	}
+
 	task, err := s.Queries.CreateAutopilotTask(ctx, db.CreateAutopilotTaskParams{
 		AgentID:        agent.ID,
-		RuntimeID:      agent.RuntimeID,
+		RuntimeID:      resolved.RuntimeID,
 		Priority:       0,
 		AutopilotRunID: run.ID,
 		// Snapshot the autopilot title so task rows self-describe later

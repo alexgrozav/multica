@@ -1928,7 +1928,16 @@ func (h *Handler) QuickCreateIssue(w http.ResponseWriter, r *http.Request) {
 		writeAgentUnavailable(w, "agent has no runtime")
 		return
 	}
-	if !h.isRuntimeOnline(r.Context(), agent.RuntimeID) {
+	// Fallback-aware availability: the modal only fails fast when NO bound
+	// runtime (main or fallback) is online. Resolution here also tells us
+	// which runtime the enqueue below will pin the task to, so the daemon
+	// version gate checks the machine that will actually run it.
+	resolved, err := service.ResolveDispatchRuntime(r.Context(), h.Queries, agent.ID)
+	if err != nil {
+		writeAgentUnavailable(w, "agent's runtime is no longer registered")
+		return
+	}
+	if !resolved.Online {
 		writeAgentUnavailable(w, "agent's runtime is offline")
 		return
 	}
@@ -1942,7 +1951,7 @@ func (h *Handler) QuickCreateIssue(w http.ResponseWriter, r *http.Request) {
 	// twenty seconds later. Dev-built
 	// daemons (git-describe shape) are exempted inside CheckMinCLIVersion
 	// so `make daemon` works without weakening staging or production.
-	if status, payload := h.checkQuickCreateDaemonVersion(r.Context(), agent.RuntimeID); status != 0 {
+	if status, payload := h.checkQuickCreateDaemonVersion(r.Context(), resolved.RuntimeID); status != 0 {
 		writeJSON(w, status, payload)
 		return
 	}
@@ -2012,18 +2021,6 @@ func writeAgentUnavailable(w http.ResponseWriter, reason string) {
 		"code":   "agent_unavailable",
 		"reason": reason,
 	})
-}
-
-// isRuntimeOnline returns true when the given runtime is currently
-// reachable (status == "online"). Quick-create rejects submissions whose
-// agent's runtime is offline so the user gets immediate feedback in the
-// modal instead of an inbox failure twenty seconds later.
-func (h *Handler) isRuntimeOnline(ctx context.Context, runtimeID pgtype.UUID) bool {
-	rt, err := h.Queries.GetAgentRuntime(ctx, runtimeID)
-	if err != nil {
-		return false
-	}
-	return rt.Status == "online"
 }
 
 // checkQuickCreateDaemonVersion enforces MinQuickCreateCLIVersion against the

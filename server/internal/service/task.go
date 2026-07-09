@@ -652,6 +652,31 @@ func (s *TaskService) ResolveIssueReviewSHAParam(ctx context.Context, issueID pg
 	return headShaText(s.ResolveIssueReviewSHA(ctx, issueID))
 }
 
+// dispatchRuntimeForAgent resolves the runtime a new task for this agent is
+// pinned to: an online runtime on the requester's current computer first,
+// then the main runtime, then fallbacks in order; when nothing is online it
+// returns the main runtime so queue-and-wait paths keep their semantics.
+// Logs whenever the choice deviates from the main runtime so reroutes stay
+// traceable. The agent must already be loaded and validated (exists, not
+// archived, runtime bound).
+func (s *TaskService) dispatchRuntimeForAgent(ctx context.Context, agent db.Agent) (pgtype.UUID, error) {
+	resolved, err := ResolveDispatchRuntime(ctx, s.Queries, agent.ID)
+	if err != nil {
+		return pgtype.UUID{}, fmt.Errorf("resolve dispatch runtime: %w", err)
+	}
+	if resolved.IsFallback || resolved.DaemonMatch {
+		slog.Info("dispatch runtime resolved off-main",
+			"agent_id", util.UUIDToString(agent.ID),
+			"main_runtime_id", util.UUIDToString(agent.RuntimeID),
+			"chosen_runtime_id", util.UUIDToString(resolved.RuntimeID),
+			"is_fallback", resolved.IsFallback,
+			"daemon_match", resolved.DaemonMatch,
+			"online", resolved.Online,
+		)
+	}
+	return resolved.RuntimeID, nil
+}
+
 func (s *TaskService) enqueueIssueTask(ctx context.Context, issue db.Issue, triggerCommentID pgtype.UUID, forceFreshSession bool, handoffNote string) (db.AgentTaskQueue, error) {
 	if !issue.AssigneeID.Valid {
 		slog.Error("task enqueue failed", "issue_id", util.UUIDToString(issue.ID), "error", "issue has no assignee")
@@ -671,12 +696,17 @@ func (s *TaskService) enqueueIssueTask(ctx context.Context, issue db.Issue, trig
 		slog.Error("task enqueue failed", "issue_id", util.UUIDToString(issue.ID), "error", "agent has no runtime")
 		return db.AgentTaskQueue{}, fmt.Errorf("agent has no runtime")
 	}
+	runtimeID, err := s.dispatchRuntimeForAgent(ctx, agent)
+	if err != nil {
+		slog.Error("task enqueue failed", "issue_id", util.UUIDToString(issue.ID), "error", err)
+		return db.AgentTaskQueue{}, err
+	}
 
 	originatorUserID := s.resolveOriginatorForIssueTask(ctx, issue, triggerCommentID)
 	runtimeMCPOverlay := s.buildRuntimeMCPOverlay(ctx, originatorUserID, agent)
 	task, err := s.Queries.CreateAgentTask(ctx, db.CreateAgentTaskParams{
 		AgentID:              issue.AssigneeID,
-		RuntimeID:            agent.RuntimeID,
+		RuntimeID:            runtimeID,
 		IssueID:              issue.ID,
 		Priority:             priorityToInt(issue.Priority),
 		TriggerCommentID:     triggerCommentID,
@@ -761,12 +791,17 @@ func (s *TaskService) enqueueMentionTask(ctx context.Context, issue db.Issue, ag
 		slog.Error("mention task enqueue failed: agent has no runtime", "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID))
 		return db.AgentTaskQueue{}, fmt.Errorf("agent has no runtime")
 	}
+	runtimeID, err := s.dispatchRuntimeForAgent(ctx, agent)
+	if err != nil {
+		slog.Error("mention task enqueue failed", "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID), "error", err)
+		return db.AgentTaskQueue{}, err
+	}
 
 	originatorUserID := s.resolveOriginatorForIssueTask(ctx, issue, triggerCommentID)
 	runtimeMCPOverlay := s.buildRuntimeMCPOverlay(ctx, originatorUserID, agent)
 	task, err := s.Queries.CreateAgentTask(ctx, db.CreateAgentTaskParams{
 		AgentID:              agentID,
-		RuntimeID:            agent.RuntimeID,
+		RuntimeID:            runtimeID,
 		IssueID:              issue.ID,
 		Priority:             priorityToInt(issue.Priority),
 		TriggerCommentID:     triggerCommentID,
@@ -810,11 +845,20 @@ func (s *TaskService) EnqueueDeferredAssigneeFallback(ctx context.Context, issue
 		slog.Error("deferred fallback enqueue failed: agent has no runtime", "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID))
 		return db.AgentTaskQueue{}, fmt.Errorf("agent has no runtime")
 	}
+	// Deferred tasks are promoted by the pinned runtime's own daemon at
+	// fire time, so resolution here decides which machine will wake up for
+	// the escalation. If that runtime is offline at fire time the task
+	// waits, exactly like a queued task on an offline runtime.
+	runtimeID, err := s.dispatchRuntimeForAgent(ctx, agent)
+	if err != nil {
+		slog.Error("deferred fallback enqueue failed", "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID), "error", err)
+		return db.AgentTaskQueue{}, err
+	}
 
 	isLeader := squadID.Valid
 	task, err := s.Queries.CreateDeferredAgentTask(ctx, db.CreateDeferredAgentTaskParams{
 		AgentID:             agentID,
-		RuntimeID:           agent.RuntimeID,
+		RuntimeID:           runtimeID,
 		IssueID:             issue.ID,
 		Priority:            priorityToInt(issue.Priority),
 		TriggerCommentID:    triggerCommentID,
@@ -904,6 +948,10 @@ func (s *TaskService) EnqueueQuickCreateTask(ctx context.Context, workspaceID, r
 	if !agent.RuntimeID.Valid {
 		return db.AgentTaskQueue{}, fmt.Errorf("agent has no runtime")
 	}
+	runtimeID, err := s.dispatchRuntimeForAgent(ctx, agent)
+	if err != nil {
+		return db.AgentTaskQueue{}, err
+	}
 
 	payload := QuickCreateContext{
 		Type:        QuickCreateContextType,
@@ -936,7 +984,7 @@ func (s *TaskService) EnqueueQuickCreateTask(ctx context.Context, workspaceID, r
 	runtimeMCPOverlay := s.buildRuntimeMCPOverlay(ctx, requesterID, agent)
 	task, err := s.Queries.CreateQuickCreateTask(ctx, db.CreateQuickCreateTaskParams{
 		AgentID:              agentID,
-		RuntimeID:            agent.RuntimeID,
+		RuntimeID:            runtimeID,
 		Priority:             priorityToInt("high"),
 		Context:              contextJSON,
 		OriginatorUserID:     requesterID,
@@ -1018,11 +1066,20 @@ func (s *TaskService) EnqueueChatTask(ctx context.Context, chatSession db.ChatSe
 	if !agent.RuntimeID.Valid {
 		return db.AgentTaskQueue{}, ErrChatTaskAgentNoRuntime
 	}
+	// Chat continuity across runtimes is guarded at claim time: the daemon
+	// only resumes a stored CLI session when it was recorded by the same
+	// runtime as the claiming task, so a fallback-routed turn starts a
+	// fresh session rather than replaying another machine's pointer.
+	runtimeID, err := s.dispatchRuntimeForAgent(ctx, agent)
+	if err != nil {
+		slog.Error("chat task enqueue failed", "chat_session_id", util.UUIDToString(chatSession.ID), "error", err)
+		return db.AgentTaskQueue{}, err
+	}
 
 	runtimeMCPOverlay := s.buildRuntimeMCPOverlay(ctx, initiatorUserID, agent)
 	task, err := s.Queries.CreateChatTask(ctx, db.CreateChatTaskParams{
 		AgentID:          chatSession.AgentID,
-		RuntimeID:        agent.RuntimeID,
+		RuntimeID:        runtimeID,
 		Priority:         2, // medium priority for chat
 		ChatSessionID:    chatSession.ID,
 		InitiatorUserID:  initiatorUserID,
@@ -1931,8 +1988,12 @@ func resumeUnsafeFailureReason(reason string) bool {
 // went offline, dispatch/run timeout) and the task hasn't exhausted its
 // max_attempts budget. The child task inherits agent/runtime/issue/chat
 // links and, for resume-safe failures, the parent's session_id/work_dir so
-// the agent can resume the conversation when the backend supports it. Returns
-// the new task, or nil when no retry was created.
+// the agent can resume the conversation when the backend supports it.
+// Runtime-shaped failures (runtime_offline / runtime_recovery) re-resolve
+// the dispatch runtime first: when another bound runtime is online, the
+// child is pinned there instead (with a forced-fresh session, since CLI
+// sessions are machine-local). Returns the new task, or nil when no retry
+// was created.
 //
 // Autopilot tasks are NOT auto-retried here; the autopilot scheduler owns
 // its own re-run cadence and we don't want to double-fire it.
@@ -1977,8 +2038,31 @@ func (s *TaskService) MaybeRetryFailedTask(ctx context.Context, parent db.AgentT
 	} else {
 		runtimeMCPOverlay = s.buildRuntimeMCPOverlay(ctx, parent.OriginatorUserID, agent)
 	}
+
+	// Runtime-shaped failures re-resolve the dispatch runtime so the retry
+	// can land on an online fallback instead of re-parking on the dead
+	// runtime's queue. Only override when resolution found an ONLINE runtime
+	// that differs from the parent's: a NULL override keeps the parent's
+	// runtime, preserving queue-and-wait when nothing is online. Task-shaped
+	// failures (timeout, codex inactivity) keep the parent's runtime — it is
+	// still alive and holds the resumable session; hopping machines would
+	// discard that context for no reliability gain.
+	overrideRuntime := pgtype.UUID{}
+	if reason == "runtime_offline" || reason == "runtime_recovery" {
+		if resolved, rerr := ResolveDispatchRuntime(ctx, s.Queries, parent.AgentID); rerr == nil && resolved.Online && resolved.RuntimeID != parent.RuntimeID {
+			overrideRuntime = resolved.RuntimeID
+			slog.Info("task auto-retry rerouting to fallback runtime",
+				"parent_task_id", util.UUIDToString(parent.ID),
+				"agent_id", util.UUIDToString(parent.AgentID),
+				"from_runtime_id", util.UUIDToString(parent.RuntimeID),
+				"to_runtime_id", util.UUIDToString(resolved.RuntimeID),
+			)
+		}
+	}
+
 	child, err := s.Queries.CreateRetryTask(ctx, db.CreateRetryTaskParams{
 		ID:                   parent.ID,
+		OverrideRuntimeID:    overrideRuntime,
 		RuntimeMcpOverlay:    runtimeMCPOverlay.Overlay,
 		RuntimeConnectedApps: runtimeMCPOverlay.ConnectedApps,
 	})

@@ -92,6 +92,7 @@ func runRuntimeSweeper(ctx context.Context, queries *db.Queries, liveness handle
 		case <-ticker.C:
 			sweepStaleRuntimes(ctx, queries, liveness, taskSvc, bus)
 			sweepStaleTasks(ctx, queries, taskSvc, bus)
+			sweepReroutableQueuedTasks(ctx, queries, taskSvc)
 			sweepExpiredQueuedTasks(ctx, queries, taskSvc)
 			gcRuntimes(ctx, queries, bus)
 		}
@@ -277,6 +278,28 @@ func sweepStaleTasks(ctx context.Context, queries *db.Queries, taskSvc *service.
 
 	slog.Info("task sweeper: failed stale tasks", "count", len(failedTasks))
 	taskSvc.CaptureLeaseExpiredTasks(ctx, failedTasks)
+	taskSvc.HandleFailedTasks(ctx, failedTasks)
+}
+
+// sweepReroutableQueuedTasks moves queued tasks off offline runtimes when the
+// task's agent has another bound runtime (main or fallback) online. It works
+// by failing the row with the auto-retryable 'runtime_offline' reason;
+// HandleFailedTasks then spawns the retry, whose dispatch resolution pins it
+// to the online runtime. Runs every tick — not just when a runtime flips
+// offline — because the trigger can also be the other direction: a fallback
+// coming ONLINE while tasks wait on a long-dead main runtime. Agents with no
+// online candidate are untouched and keep today's queue-and-wait behavior.
+func sweepReroutableQueuedTasks(ctx context.Context, queries *db.Queries, taskSvc *service.TaskService) {
+	failedTasks, err := queries.FailQueuedTasksForOfflineRuntimesWithFallback(ctx, queuedExpireBatchSize)
+	if err != nil {
+		slog.Warn("task sweeper: failed to reroute queued tasks off offline runtimes", "error", err)
+		return
+	}
+	if len(failedTasks) == 0 {
+		return
+	}
+
+	slog.Info("task sweeper: rerouting queued tasks off offline runtimes", "count", len(failedTasks))
 	taskSvc.HandleFailedTasks(ctx, failedTasks)
 }
 

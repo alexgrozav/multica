@@ -1628,9 +1628,14 @@ func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 				// poisoned sessions.
 				if prior.RuntimeID == task.RuntimeID {
 					resp.PriorSessionID = prior.SessionID.String
-				}
-				if prior.WorkDir.Valid {
-					resp.PriorWorkDir = prior.WorkDir.String
+					// Workdir is machine-local like the session: a path
+					// recorded by a different runtime is meaningless (or
+					// worse, collides) on this machine, so it only rides
+					// along on a runtime match. Fallback-routed tasks
+					// prepare a fresh env instead.
+					if prior.WorkDir.Valid {
+						resp.PriorWorkDir = prior.WorkDir.String
+					}
 				}
 			}
 		}
@@ -1675,16 +1680,22 @@ func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 				// requires runtime to match.
 				if cs.SessionID.Valid && cs.RuntimeID.Valid && cs.RuntimeID == task.RuntimeID {
 					resp.PriorSessionID = cs.SessionID.String
-				}
-				if cs.WorkDir.Valid {
-					resp.PriorWorkDir = cs.WorkDir.String
+					// Workdir follows the same runtime-match rule as the
+					// session pointer: it is a machine-local path, useless
+					// on any other runtime (fallback-routed turns prepare
+					// a fresh env instead).
+					if cs.WorkDir.Valid {
+						resp.PriorWorkDir = cs.WorkDir.String
+					}
 				}
 				if prior, err := h.Queries.GetLastChatTaskSession(r.Context(), cs.ID); err == nil && prior.SessionID.Valid {
-					if resp.PriorSessionID == "" && prior.RuntimeID == task.RuntimeID {
-						resp.PriorSessionID = prior.SessionID.String
-					}
-					if prior.WorkDir.Valid && resp.PriorWorkDir == "" {
-						resp.PriorWorkDir = prior.WorkDir.String
+					if prior.RuntimeID == task.RuntimeID {
+						if resp.PriorSessionID == "" {
+							resp.PriorSessionID = prior.SessionID.String
+						}
+						if prior.WorkDir.Valid && resp.PriorWorkDir == "" {
+							resp.PriorWorkDir = prior.WorkDir.String
+						}
 					}
 				}
 			}

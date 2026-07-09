@@ -34,6 +34,23 @@ export function deriveAgentAvailability(
   return "offline"; // offline | about_to_gc collapse here
 }
 
+// Best-of availability across an agent's bound runtimes (main + ordered
+// fallbacks). Dispatch pins new work to any online bound runtime, so the
+// agent is reachable when ANY of them is — an offline main with a live
+// fallback must not render the agent as offline.
+export function deriveBestAgentAvailability(
+  runtimes: readonly (AgentRuntime | null)[],
+  now: number,
+): AgentAvailability {
+  let best: AgentAvailability = "offline";
+  for (const rt of runtimes) {
+    const availability = deriveAgentAvailability(rt, now);
+    if (availability === "online") return "online";
+    if (availability === "unstable") best = "unstable";
+  }
+  return best;
+}
+
 // Atomic workload derivation: pure 3-way classification of running/queued
 // counts. Exported so Runtime-level views (which already aggregate counts
 // per-runtime in their own indices) can plug into the same vocabulary
@@ -85,6 +102,10 @@ export function deriveWorkloadDetail(tasks: readonly AgentTask[]): WorkloadDetai
 interface DerivePresenceInput {
   agent: Agent;
   runtime: AgentRuntime | null;
+  // The agent's resolved fallback runtimes (agent.fallback_runtime_ids in
+  // order). Optional so existing callers — including mobile, which shares
+  // these pure functions — keep their single-runtime semantics untouched.
+  fallbackRuntimes?: readonly AgentRuntime[];
   // Tasks for THIS agent only. Callers (buildPresenceMap, hooks) pre-filter
   // by agent_id — we don't re-check here.
   tasks: readonly AgentTask[];
@@ -108,7 +129,10 @@ export function deriveAgentPresenceDetail(input: DerivePresenceInput): AgentPres
     };
   }
 
-  const availability = deriveAgentAvailability(input.runtime, input.now);
+  const availability = deriveBestAgentAvailability(
+    [input.runtime, ...(input.fallbackRuntimes ?? [])],
+    input.now,
+  );
   const detail = deriveWorkloadDetail(input.tasks);
 
   return {
@@ -148,8 +172,14 @@ export function buildPresenceMap(args: {
 
   for (const agent of args.agents) {
     const runtime = runtimesById.get(agent.runtime_id) ?? null;
+    const fallbackRuntimes = (agent.fallback_runtime_ids ?? [])
+      .map((id) => runtimesById.get(id))
+      .filter((r): r is AgentRuntime => !!r);
     const tasks = tasksByAgent.get(agent.id) ?? [];
-    out.set(agent.id, deriveAgentPresenceDetail({ agent, runtime, tasks, now: args.now }));
+    out.set(
+      agent.id,
+      deriveAgentPresenceDetail({ agent, runtime, fallbackRuntimes, tasks, now: args.now }),
+    );
   }
   return out;
 }

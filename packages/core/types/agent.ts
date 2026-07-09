@@ -277,6 +277,14 @@ export interface Agent {
   id: string;
   workspace_id: string;
   runtime_id: string;
+  /**
+   * Ordered list of same-provider runtimes dispatch may fall back to when
+   * the main runtime is offline (or prefer when one of them is the
+   * requester's current computer). Optional so older backends that omit
+   * the field don't crash the renderer; treat `undefined` as "no
+   * fallbacks configured".
+   */
+  fallback_runtime_ids?: string[];
   name: string;
   description: string;
   instructions: string;
@@ -395,6 +403,9 @@ export interface CreateAgentRequest {
   instructions?: string;
   avatar_url?: string;
   runtime_id: string;
+  /** Ordered fallback runtimes — same provider as `runtime_id`. See
+   *  `Agent.fallback_runtime_ids`. */
+  fallback_runtime_ids?: string[];
   runtime_config?: Record<string, unknown>;
   custom_env?: Record<string, string>;
   custom_args?: string[];
@@ -504,6 +515,13 @@ export interface UpdateAgentRequest {
   instructions?: string;
   avatar_url?: string;
   runtime_id?: string;
+  /**
+   * Ordered fallback runtimes. Field omitted → no change; `[]` → clear;
+   * list → wholesale replace (validated server-side: same workspace, same
+   * provider as the main runtime). Changing `runtime_id` without this
+   * field prunes stored entries that no longer match the new provider.
+   */
+  fallback_runtime_ids?: string[];
   runtime_config?: Record<string, unknown>;
   /**
    * NOTE: `custom_env` is intentionally NOT updatable through this

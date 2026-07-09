@@ -21,6 +21,7 @@ import (
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
 	"github.com/multica-ai/multica/server/internal/runtimeapps"
 	"github.com/multica-ai/multica/server/internal/service"
+	"github.com/multica-ai/multica/server/internal/util"
 	"github.com/multica-ai/multica/server/pkg/agent"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
@@ -33,10 +34,15 @@ import (
 const maxAgentDescriptionLength = 255
 
 type AgentResponse struct {
-	ID            string          `json:"id"`
-	WorkspaceID   string          `json:"workspace_id"`
-	RuntimeID     string          `json:"runtime_id"`
-	Name          string          `json:"name"`
+	ID          string `json:"id"`
+	WorkspaceID string `json:"workspace_id"`
+	RuntimeID   string `json:"runtime_id"`
+	// FallbackRuntimeIDs is the ordered list of same-provider runtimes
+	// dispatch may fall back to when the main runtime is offline (or prefer
+	// when one of them is the requester's current computer). Populated on
+	// list/get/create/update responses; broadcast payloads leave it empty.
+	FallbackRuntimeIDs []string        `json:"fallback_runtime_ids"`
+	Name               string          `json:"name"`
 	Description   string          `json:"description"`
 	Instructions  string          `json:"instructions"`
 	AvatarURL     *string         `json:"avatar_url"`
@@ -153,6 +159,7 @@ func agentToResponse(a db.Agent) AgentResponse {
 		ID:                       uuidToString(a.ID),
 		WorkspaceID:              uuidToString(a.WorkspaceID),
 		RuntimeID:                uuidToString(a.RuntimeID),
+		FallbackRuntimeIDs:       []string{},
 		Name:                     a.Name,
 		Description:              a.Description,
 		Instructions:             a.Instructions,
@@ -623,6 +630,23 @@ func (h *Handler) ListAgents(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	// Batch-load fallback runtimes for all agents (rows arrive ordered by
+	// position, so appending preserves the fallback order).
+	agentIDs := make([]pgtype.UUID, len(agents))
+	for i, a := range agents {
+		agentIDs[i] = a.ID
+	}
+	fallbackRows, err := h.Queries.ListAgentFallbackRuntimesByAgentIDs(r.Context(), agentIDs)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load agent fallback runtimes")
+		return
+	}
+	fallbackMap := map[string][]string{}
+	for _, row := range fallbackRows {
+		agentID := uuidToString(row.AgentID)
+		fallbackMap[agentID] = append(fallbackMap[agentID], uuidToString(row.RuntimeID))
+	}
+
 	// mcp_config still uses the workspace-level always-redact setting and
 	// the per-row owner/admin gate — secrets in MCP server configs follow
 	// the same exposure rules as custom_env used to. custom_env itself is
@@ -659,6 +683,9 @@ func (h *Handler) ListAgents(w http.ResponseWriter, r *http.Request) {
 		applyInvocationTargetsToResponse(&resp, targets)
 		if skills, ok := skillMap[resp.ID]; ok {
 			resp.Skills = skills
+		}
+		if fb, ok := fallbackMap[resp.ID]; ok {
+			resp.FallbackRuntimeIDs = fb
 		}
 		// Agent actors NEVER see mcp_config secrets, even when their host's
 		// PAT would normally satisfy the owner/admin role gate. Otherwise an
@@ -716,6 +743,10 @@ func (h *Handler) GetAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load agent skills")
 		return
 	}
+	if err := h.attachFallbackRuntimes(r.Context(), &resp, agent.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load agent fallback runtimes")
+		return
+	}
 
 	// mcp_config redaction (custom_env was removed from this response shape
 	// in MUL-2600; secrets are now fetched via GET /api/agents/{id}/env).
@@ -747,12 +778,17 @@ func (h *Handler) GetAgent(w http.ResponseWriter, r *http.Request) {
 }
 
 type CreateAgentRequest struct {
-	Name          string            `json:"name"`
-	Description   string            `json:"description"`
-	Instructions  string            `json:"instructions"`
-	AvatarURL     *string           `json:"avatar_url"`
-	RuntimeID     string            `json:"runtime_id"`
-	RuntimeConfig any               `json:"runtime_config"`
+	Name         string  `json:"name"`
+	Description  string  `json:"description"`
+	Instructions string  `json:"instructions"`
+	AvatarURL    *string `json:"avatar_url"`
+	RuntimeID    string  `json:"runtime_id"`
+	// FallbackRuntimeIDs is the ordered fallback list (see AgentResponse).
+	// Every entry must be a same-workspace runtime the caller may use, with
+	// the same provider as runtime_id. Duplicates and the main runtime
+	// itself are dropped rather than rejected.
+	FallbackRuntimeIDs []string          `json:"fallback_runtime_ids"`
+	RuntimeConfig      any               `json:"runtime_config"`
 	CustomEnv     map[string]string `json:"custom_env"`
 	CustomArgs    []string          `json:"custom_args"`
 	McpConfig     json.RawMessage   `json:"mcp_config"`
@@ -875,6 +911,12 @@ func (h *Handler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	fallbackRuntimeIDs, fbStatus, fbMsg := h.validateFallbackRuntimes(r.Context(), member, wsUUID, runtime, req.FallbackRuntimeIDs)
+	if fbStatus != 0 {
+		writeError(w, fbStatus, fbMsg)
+		return
+	}
+
 	// thinking_level validation: provider-level enum only. Per-model gaps
 	// are enforced by the daemon at execution time (MUL-2339, Trump's
 	// review note — keep API behaviour consistent: literal-invalid →
@@ -970,6 +1012,15 @@ func (h *Handler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("create agent: persist invocation targets failed", append(logger.RequestAttrs(r), "error", err, "agent_id", uuidToString(created.ID))...)
 	}
 
+	// Persist the fallback list. Same best-effort stance as invocation
+	// targets: the agent row exists and safely defaults to "no fallbacks";
+	// the response re-reads the stored list so the caller sees the truth.
+	if len(fallbackRuntimeIDs) > 0 {
+		if err := h.replaceFallbackRuntimes(r.Context(), created.ID, fallbackRuntimeIDs); err != nil {
+			slog.Warn("create agent: persist fallback runtimes failed", append(logger.RequestAttrs(r), "error", err, "agent_id", uuidToString(created.ID))...)
+		}
+	}
+
 	if runtime.Status == "online" {
 		h.TaskService.ReconcileAgentStatus(r.Context(), created.ID)
 		created, _ = h.Queries.GetAgent(r.Context(), created.ID)
@@ -978,6 +1029,9 @@ func (h *Handler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 	resp := agentToResponse(created)
 	if err := h.enrichAgentResponseWithTargets(r.Context(), &resp, created.ID); err != nil {
 		slog.Warn("create agent: load invocation targets for response failed", append(logger.RequestAttrs(r), "error", err, "agent_id", uuidToString(created.ID))...)
+	}
+	if err := h.attachFallbackRuntimes(r.Context(), &resp, created.ID); err != nil {
+		slog.Warn("create agent: load fallback runtimes for response failed", append(logger.RequestAttrs(r), "error", err, "agent_id", uuidToString(created.ID))...)
 	}
 	actorType, actorID := h.resolveActor(r, ownerID, workspaceID)
 	h.publish(protocol.EventAgentCreated, workspaceID, actorType, actorID, map[string]any{"agent": broadcastAgentResponse(resp)})
@@ -1000,12 +1054,19 @@ func (h *Handler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 }
 
 type UpdateAgentRequest struct {
-	Name          *string `json:"name"`
-	Description   *string `json:"description"`
-	Instructions  *string `json:"instructions"`
-	AvatarURL     *string `json:"avatar_url"`
-	RuntimeID     *string `json:"runtime_id"`
-	RuntimeConfig any     `json:"runtime_config"`
+	Name         *string `json:"name"`
+	Description  *string `json:"description"`
+	Instructions *string `json:"instructions"`
+	AvatarURL    *string `json:"avatar_url"`
+	RuntimeID    *string `json:"runtime_id"`
+	// FallbackRuntimeIDs replaces the ordered fallback list wholesale when
+	// present ([] clears it); omitted leaves the stored list alone — except
+	// that a runtime_id change in the same request prunes stored entries
+	// that no longer match the new main runtime's provider (or now equal
+	// the main runtime itself), the same app-layer integrity stance as the
+	// model/thinking_level auto-reconciliation below.
+	FallbackRuntimeIDs *[]string `json:"fallback_runtime_ids"`
+	RuntimeConfig      any       `json:"runtime_config"`
 	// custom_env is intentionally NOT updatable through this endpoint.
 	// Use `PUT /api/agents/{id}/env` for env changes — that path is
 	// owner/admin-only, denies agent actors, and writes a persisted
@@ -1322,6 +1383,32 @@ func (h *Handler) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		targetRuntimeID = runtime.ID
 		targetProvider = runtime.Provider
 	}
+	// Fallback runtimes: wholesale replace when the field is present
+	// (validated against the runtime that will be in force AFTER this
+	// update); when omitted, a runtime move still prunes stored entries
+	// that no longer match the new main runtime (post-update below).
+	fallbackTouched := req.FallbackRuntimeIDs != nil
+	var newFallbackIDs []pgtype.UUID
+	if fallbackTouched {
+		member, ok := h.workspaceMember(w, r, uuidToString(existing.WorkspaceID))
+		if !ok {
+			return
+		}
+		targetRuntime, err := h.Queries.GetAgentRuntimeForWorkspace(r.Context(), db.GetAgentRuntimeForWorkspaceParams{
+			ID:          targetRuntimeID,
+			WorkspaceID: existing.WorkspaceID,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to resolve runtime for fallback validation")
+			return
+		}
+		ids, fbStatus, fbMsg := h.validateFallbackRuntimes(r.Context(), member, existing.WorkspaceID, targetRuntime, *req.FallbackRuntimeIDs)
+		if fbStatus != 0 {
+			writeError(w, fbStatus, fbMsg)
+			return
+		}
+		newFallbackIDs = ids
+	}
 	// Invocation permission (MUL-3963). OWNER-ONLY write: access is the one
 	// agent property a workspace admin may NOT change (only the owner decides
 	// who can run their agent — the overlay uses the owner's own Composio
@@ -1529,6 +1616,23 @@ func (h *Handler) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Fallback runtimes: apply after the row update so the list and a
+	// same-request runtime move land together.
+	if fallbackTouched {
+		if err := h.replaceFallbackRuntimes(r.Context(), updated.ID, newFallbackIDs); err != nil {
+			slog.Warn("update agent: persist fallback runtimes failed", append(logger.RequestAttrs(r), "error", err, "agent_id", id)...)
+			writeError(w, http.StatusInternalServerError, "failed to update fallback runtimes: "+err.Error())
+			return
+		}
+	} else if req.RuntimeID != nil {
+		if err := h.pruneFallbackRuntimesForMainChange(r.Context(), updated.ID, updated.RuntimeID, targetProvider); err != nil {
+			// Best-effort: a stale same-provider list is harmless (dispatch
+			// re-checks provider-agnostic online status; a mismatched entry
+			// only wastes a candidate slot), so don't fail the update.
+			slog.Warn("update agent: prune fallback runtimes failed", append(logger.RequestAttrs(r), "error", err, "agent_id", id)...)
+		}
+	}
+
 	resp := agentToResponse(updated)
 	if err := h.enrichAgentResponseWithTargets(r.Context(), &resp, updated.ID); err != nil {
 		slog.Warn("update agent: load invocation targets for response failed", append(logger.RequestAttrs(r), "error", err, "agent_id", id)...)
@@ -1543,6 +1647,11 @@ func (h *Handler) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 	if err := h.attachAgentSkills(r.Context(), &resp, updated.ID); err != nil {
 		slog.Warn("load agent skills after update failed", append(logger.RequestAttrs(r), "error", err, "agent_id", id)...)
 		writeError(w, http.StatusInternalServerError, "failed to load agent skills")
+		return
+	}
+	if err := h.attachFallbackRuntimes(r.Context(), &resp, updated.ID); err != nil {
+		slog.Warn("load agent fallback runtimes after update failed", append(logger.RequestAttrs(r), "error", err, "agent_id", id)...)
+		writeError(w, http.StatusInternalServerError, "failed to load agent fallback runtimes")
 		return
 	}
 	slog.Info("agent updated", append(logger.RequestAttrs(r), "agent_id", id, "workspace_id", uuidToString(updated.WorkspaceID))...)
@@ -1560,6 +1669,112 @@ func (h *Handler) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		redactComposioToolkitAllowlist(&resp)
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// maxFallbackRuntimes caps the ordered fallback list. The cap is a sanity
+// bound, not a product limit — resolution walks the list linearly on every
+// enqueue, and a workspace has no legitimate reason to chain more machines
+// than this behind one agent.
+const maxFallbackRuntimes = 10
+
+// validateFallbackRuntimes parses and authorizes an ordered fallback list
+// against the agent's (target) main runtime. Every entry must be a
+// same-workspace runtime the member may use (same gate as the main runtime)
+// with the SAME provider as the main runtime — cross-provider fallback is a
+// different agent wearing the same name (model/thinking/args are
+// provider-native), so it is rejected outright. Duplicates and the main
+// runtime itself are silently dropped: they are redundant, not wrong, and a
+// PATCH-as-PUT client that echoes state back should not 400.
+// Returns (ids, 0, "") on success or (nil, status, message) on rejection.
+func (h *Handler) validateFallbackRuntimes(ctx context.Context, member db.Member, workspaceID pgtype.UUID, mainRuntime db.AgentRuntime, ids []string) ([]pgtype.UUID, int, string) {
+	if len(ids) > maxFallbackRuntimes {
+		return nil, http.StatusBadRequest, fmt.Sprintf("at most %d fallback runtimes are allowed", maxFallbackRuntimes)
+	}
+	out := make([]pgtype.UUID, 0, len(ids))
+	seen := map[string]bool{uuidToString(mainRuntime.ID): true}
+	for _, raw := range ids {
+		u, err := util.ParseUUID(raw)
+		if err != nil {
+			return nil, http.StatusBadRequest, fmt.Sprintf("invalid fallback runtime id %q", raw)
+		}
+		key := uuidToString(u)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		rt, err := h.Queries.GetAgentRuntimeForWorkspace(ctx, db.GetAgentRuntimeForWorkspaceParams{
+			ID:          u,
+			WorkspaceID: workspaceID,
+		})
+		if err != nil {
+			return nil, http.StatusBadRequest, fmt.Sprintf("invalid fallback runtime id %q", raw)
+		}
+		if !canUseRuntimeForAgent(member, rt) {
+			return nil, http.StatusForbidden, "fallback runtime is private; only its owner or a workspace admin can use it"
+		}
+		if rt.Provider != mainRuntime.Provider {
+			return nil, http.StatusBadRequest, fmt.Sprintf("fallback runtime %q runs provider %q; fallbacks must match the main runtime's provider %q", rt.Name, rt.Provider, mainRuntime.Provider)
+		}
+		out = append(out, rt.ID)
+	}
+	return out, 0, ""
+}
+
+// replaceFallbackRuntimes rewrites the agent's ordered fallback list
+// (delete + insert). Not transactional with the surrounding agent write —
+// same best-effort stance as invocation targets; the response re-reads the
+// stored list so callers always see the truth.
+func (h *Handler) replaceFallbackRuntimes(ctx context.Context, agentID pgtype.UUID, runtimeIDs []pgtype.UUID) error {
+	if err := h.Queries.DeleteAgentFallbackRuntimes(ctx, agentID); err != nil {
+		return err
+	}
+	if len(runtimeIDs) == 0 {
+		return nil
+	}
+	return h.Queries.InsertAgentFallbackRuntimes(ctx, db.InsertAgentFallbackRuntimesParams{
+		AgentID:    agentID,
+		RuntimeIds: runtimeIDs,
+	})
+}
+
+// pruneFallbackRuntimesForMainChange drops stored fallback entries that are
+// incompatible with a NEW main runtime: entries whose provider differs and
+// the entry equal to the new main itself. Called when an update moves
+// runtime_id without submitting fallback_runtime_ids, so the stored list
+// keeps the same invariants a fresh write would have.
+func (h *Handler) pruneFallbackRuntimesForMainChange(ctx context.Context, agentID, mainRuntimeID pgtype.UUID, mainProvider string) error {
+	rows, err := h.Queries.ListAgentFallbackRuntimes(ctx, agentID)
+	if err != nil {
+		return err
+	}
+	kept := make([]pgtype.UUID, 0, len(rows))
+	changed := false
+	for _, row := range rows {
+		if row.RuntimeID == mainRuntimeID || row.Provider != mainProvider {
+			changed = true
+			continue
+		}
+		kept = append(kept, row.RuntimeID)
+	}
+	if !changed {
+		return nil
+	}
+	return h.replaceFallbackRuntimes(ctx, agentID, kept)
+}
+
+// attachFallbackRuntimes populates resp.FallbackRuntimeIDs from the stored
+// ordered list. agentToResponse zeros the field like Skills.
+func (h *Handler) attachFallbackRuntimes(ctx context.Context, resp *AgentResponse, agentID pgtype.UUID) error {
+	rows, err := h.Queries.ListAgentFallbackRuntimes(ctx, agentID)
+	if err != nil {
+		return err
+	}
+	ids := make([]string, len(rows))
+	for i, row := range rows {
+		ids[i] = uuidToString(row.RuntimeID)
+	}
+	resp.FallbackRuntimeIDs = ids
+	return nil
 }
 
 // attachAgentSkills populates resp.Skills from the agent_skill junction

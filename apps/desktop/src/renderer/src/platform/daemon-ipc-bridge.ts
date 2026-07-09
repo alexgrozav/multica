@@ -2,6 +2,7 @@
 
 import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { api } from "@multica/core/api";
 import { runtimeKeys } from "@multica/core/runtimes";
 import type { AgentRuntime } from "@multica/core/types";
 
@@ -69,19 +70,32 @@ export function useDaemonIPCBridge(wsId: string | undefined): void {
   useEffect(() => {
     if (!wsId) return;
     if (typeof window === "undefined") return;
-    const daemonAPI = (window as unknown as { daemonAPI?: { onStatusChange?: (cb: (s: DaemonStatusLike) => void) => () => void } }).daemonAPI;
+    const daemonAPI = (window as unknown as {
+      daemonAPI?: {
+        onStatusChange?: (cb: (s: DaemonStatusLike) => void) => () => void;
+        getStatus?: () => Promise<DaemonStatusLike>;
+      };
+    }).daemonAPI;
     if (!daemonAPI?.onStatusChange) return;
 
-    const unsubscribe = daemonAPI.onStatusChange((status) => {
+    const apply = (status: DaemonStatusLike) => {
       if (!status.daemonId) return;
+      // Tell the API client which daemon is "this computer" so dispatch
+      // prefers it when the user triggers agent work from this machine.
+      // Identity, not liveness: the server only routes to it while its
+      // runtime rows are online, so a stopped daemon needs no clearing.
+      api.setLocalDaemonId(status.daemonId);
       qc.setQueryData<AgentRuntime[]>(runtimeKeys.list(wsId), (old) => {
         if (!old) return old;
         return old.map((rt) =>
           rt.daemon_id === status.daemonId ? mergeDaemonStatus(rt, status) : rt,
         );
       });
-    });
+    };
 
-    return unsubscribe;
+    // Seed from the current status so the local-daemon hint doesn't wait
+    // for the next state transition (onStatusChange only fires on change).
+    daemonAPI.getStatus?.().then(apply).catch(() => {});
+    return daemonAPI.onStatusChange(apply);
   }, [wsId, qc]);
 }

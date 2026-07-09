@@ -1406,17 +1406,24 @@ INSERT INTO agent_task_queue (
     squad_id, originator_user_id, runtime_mcp_overlay, runtime_connected_apps
 )
 SELECT
-    p.agent_id, p.runtime_id, p.issue_id, p.chat_session_id, p.autopilot_run_id,
+    p.agent_id,
+    COALESCE($2::uuid, p.runtime_id),
+    p.issue_id, p.chat_session_id, p.autopilot_run_id,
     'queued', p.priority, p.trigger_comment_id, p.trigger_summary, p.context,
-    CASE WHEN p.failure_reason IS NOT DISTINCT FROM 'codex_semantic_inactivity' THEN NULL ELSE p.session_id END,
-    CASE WHEN p.failure_reason IS NOT DISTINCT FROM 'codex_semantic_inactivity' THEN NULL ELSE p.work_dir END,
+    CASE WHEN p.failure_reason IS NOT DISTINCT FROM 'codex_semantic_inactivity'
+           OR ($2::uuid IS NOT NULL AND $2::uuid IS DISTINCT FROM p.runtime_id)
+         THEN NULL ELSE p.session_id END,
+    CASE WHEN p.failure_reason IS NOT DISTINCT FROM 'codex_semantic_inactivity'
+           OR ($2::uuid IS NOT NULL AND $2::uuid IS DISTINCT FROM p.runtime_id)
+         THEN NULL ELSE p.work_dir END,
     p.attempt + 1, p.max_attempts, p.id,
-    p.failure_reason IS NOT DISTINCT FROM 'codex_semantic_inactivity',
+    (p.failure_reason IS NOT DISTINCT FROM 'codex_semantic_inactivity')
+      OR ($2::uuid IS NOT NULL AND $2::uuid IS DISTINCT FROM p.runtime_id),
     p.is_leader_task,
     p.squad_id,
     p.originator_user_id,
-    $2,
-    $3
+    $3,
+    $4
 FROM agent_task_queue p
 WHERE p.id = $1
 RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps
@@ -1424,6 +1431,7 @@ RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, c
 
 type CreateRetryTaskParams struct {
 	ID                   pgtype.UUID `json:"id"`
+	OverrideRuntimeID    pgtype.UUID `json:"override_runtime_id"`
 	RuntimeMcpOverlay    []byte      `json:"runtime_mcp_overlay"`
 	RuntimeConnectedApps []byte      `json:"runtime_connected_apps"`
 }
@@ -1445,8 +1453,20 @@ type CreateRetryTaskParams struct {
 // run has not changed. The Composio overlay follows the agent's invocation
 // permission and uses the agent owner's connection (MUL-3963); originator is
 // carried for A2A/audit, not as an originator == agent.owner_id gate.
+//
+// override_runtime_id reroutes the retry to a different runtime (the
+// fallback-runtime path for runtime-shaped failures). NULL keeps the
+// parent's runtime. When the override actually changes the runtime, the
+// child must NOT inherit session_id/work_dir (CLI sessions and workdirs are
+// machine-local) and force_fresh_session is set so the daemon skips every
+// prior-state resume lookup on the new machine.
 func (q *Queries) CreateRetryTask(ctx context.Context, arg CreateRetryTaskParams) (AgentTaskQueue, error) {
-	row := q.db.QueryRow(ctx, createRetryTask, arg.ID, arg.RuntimeMcpOverlay, arg.RuntimeConnectedApps)
+	row := q.db.QueryRow(ctx, createRetryTask,
+		arg.ID,
+		arg.OverrideRuntimeID,
+		arg.RuntimeMcpOverlay,
+		arg.RuntimeConnectedApps,
+	)
 	var i AgentTaskQueue
 	err := row.Scan(
 		&i.ID,
@@ -1734,6 +1754,112 @@ func (q *Queries) FailAgentTask(ctx context.Context, arg FailAgentTaskParams) (A
 		&i.RuntimeConnectedApps,
 	)
 	return i, err
+}
+
+const failQueuedTasksForOfflineRuntimesWithFallback = `-- name: FailQueuedTasksForOfflineRuntimesWithFallback :many
+WITH victims AS (
+    SELECT t.id FROM agent_task_queue t
+    JOIN agent_runtime dead ON dead.id = t.runtime_id
+    WHERE t.status = 'queued'
+      AND dead.status = 'offline'
+      AND t.autopilot_run_id IS NULL
+      AND (t.issue_id IS NOT NULL OR t.chat_session_id IS NOT NULL)
+      AND t.attempt < t.max_attempts
+      AND EXISTS (
+          SELECT 1
+          FROM (
+              SELECT a.runtime_id FROM agent a WHERE a.id = t.agent_id
+              UNION ALL
+              SELECT afr.runtime_id FROM agent_fallback_runtime afr WHERE afr.agent_id = t.agent_id
+          ) cand
+          JOIN agent_runtime ar ON ar.id = cand.runtime_id
+          WHERE ar.status = 'online'
+      )
+    ORDER BY t.created_at ASC
+    LIMIT $1::int
+    FOR UPDATE OF t SKIP LOCKED
+)
+UPDATE agent_task_queue t
+SET status = 'failed',
+    completed_at = now(),
+    error = 'runtime went offline',
+    failure_reason = 'runtime_offline',
+    prepare_lease_expires_at = NULL
+FROM victims v
+WHERE t.id = v.id
+  AND t.status = 'queued'
+RETURNING t.id, t.agent_id, t.issue_id, t.status, t.priority, t.dispatched_at, t.started_at, t.completed_at, t.result, t.error, t.created_at, t.context, t.runtime_id, t.session_id, t.work_dir, t.trigger_comment_id, t.chat_session_id, t.autopilot_run_id, t.attempt, t.max_attempts, t.parent_task_id, t.failure_reason, t.trigger_summary, t.force_fresh_session, t.is_leader_task, t.wait_reason, t.initiator_user_id, t.handoff_note, t.prepare_lease_expires_at, t.squad_id, t.runtime_mcp_overlay, t.escalation_for_task_id, t.fire_at, t.originator_user_id, t.runtime_connected_apps
+`
+
+// Reroute arm of the fallback-runtime feature: fails queued tasks whose
+// pinned runtime is offline WHEN the agent has some other bound runtime
+// (main or fallback) online to take the work. The failure_reason
+// 'runtime_offline' is auto-retryable, so HandleFailedTasks immediately
+// spawns a retry that re-resolves onto the online runtime — the visible
+// effect is a reroute, not a failure.
+//
+// Deliberately narrow so it can never make things worse than today's
+// queue-and-wait behavior:
+//   - only tasks the auto-retry path will actually pick up: non-autopilot
+//     (autopilot owns its own re-run cadence), issue- or chat-linked
+//     (quick-create tasks are excluded), and with retry budget left;
+//   - agents whose candidates are ALL offline keep waiting untouched;
+//   - same FOR UPDATE SKIP LOCKED + re-check discipline as
+//     ExpireStaleQueuedTasks so a concurrent daemon claim wins the race.
+func (q *Queries) FailQueuedTasksForOfflineRuntimesWithFallback(ctx context.Context, maxPerTick int32) ([]AgentTaskQueue, error) {
+	rows, err := q.db.Query(ctx, failQueuedTasksForOfflineRuntimesWithFallback, maxPerTick)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AgentTaskQueue{}
+	for rows.Next() {
+		var i AgentTaskQueue
+		if err := rows.Scan(
+			&i.ID,
+			&i.AgentID,
+			&i.IssueID,
+			&i.Status,
+			&i.Priority,
+			&i.DispatchedAt,
+			&i.StartedAt,
+			&i.CompletedAt,
+			&i.Result,
+			&i.Error,
+			&i.CreatedAt,
+			&i.Context,
+			&i.RuntimeID,
+			&i.SessionID,
+			&i.WorkDir,
+			&i.TriggerCommentID,
+			&i.ChatSessionID,
+			&i.AutopilotRunID,
+			&i.Attempt,
+			&i.MaxAttempts,
+			&i.ParentTaskID,
+			&i.FailureReason,
+			&i.TriggerSummary,
+			&i.ForceFreshSession,
+			&i.IsLeaderTask,
+			&i.WaitReason,
+			&i.InitiatorUserID,
+			&i.HandoffNote,
+			&i.PrepareLeaseExpiresAt,
+			&i.SquadID,
+			&i.RuntimeMcpOverlay,
+			&i.EscalationForTaskID,
+			&i.FireAt,
+			&i.OriginatorUserID,
+			&i.RuntimeConnectedApps,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const failStaleTasks = `-- name: FailStaleTasks :many

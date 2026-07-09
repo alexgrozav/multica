@@ -42,6 +42,7 @@ import { CharCounter } from "./char-counter";
 import { useT } from "../../i18n";
 import { ConcurrencyPicker } from "./inspector/concurrency-picker";
 import { ModelPicker } from "./inspector/model-picker";
+import { FallbackRuntimePicker } from "./inspector/fallback-runtime-picker";
 import { RuntimePicker } from "./inspector/runtime-picker";
 import { SkillAttach } from "./inspector/skill-attach";
 import { ThinkingPropRow } from "./inspector/thinking-prop-row";
@@ -131,6 +132,19 @@ export function AgentDetailInspector({
             currentUserId={currentUserId}
             canEdit={canEdit}
             onChange={(id) => update({ runtime_id: id })}
+          />
+        </PropRow>
+        <PropRow
+          label={t(($) => $.inspector.prop_fallback_runtimes)}
+          interactive={false}
+        >
+          <FallbackRuntimePicker
+            mainRuntimeId={agent.runtime_id}
+            value={agent.fallback_runtime_ids ?? []}
+            runtimes={runtimes}
+            currentUserId={currentUserId}
+            canEdit={canEdit}
+            onChange={(ids) => update({ fallback_runtime_ids: ids })}
           />
         </PropRow>
         <PropRow label={t(($) => $.inspector.prop_model)} interactive={false}>

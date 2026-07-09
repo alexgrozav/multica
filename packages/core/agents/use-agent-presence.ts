@@ -154,9 +154,12 @@ export function useAgentPresenceDetail(
     // Missing runtime is a legitimate state (offline) — pass null and let
     // derive handle it.
     const runtime = safeRuntimes.find((r) => r.id === agent.runtime_id) ?? null;
+    const fallbackRuntimes = (agent.fallback_runtime_ids ?? [])
+      .map((id) => safeRuntimes.find((r) => r.id === id))
+      .filter((r): r is NonNullable<typeof r> => !!r);
 
     const tasks = safeSnapshot.filter((t) => t.agent_id === agentId);
-    return deriveAgentPresenceDetail({ agent, runtime, tasks, now: Date.now() });
+    return deriveAgentPresenceDetail({ agent, runtime, fallbackRuntimes, tasks, now: Date.now() });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wsId, agentId, agents, runtimes, snapshot, agentsErr, runtimesErr, snapshotErr, tick]);
 }

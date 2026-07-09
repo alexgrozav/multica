@@ -449,4 +449,57 @@ describe("buildPresenceMap", () => {
     });
     expect(map.get("a")?.workload).toBe("idle");
   });
+
+  it("reads an agent as online when the main runtime is offline but a fallback is online", () => {
+    // Dispatch pins new work to any online bound runtime, so a live
+    // fallback keeps the agent reachable even with a long-dead main.
+    const agent = makeAgent({
+      id: "a",
+      runtime_id: "rt-main",
+      fallback_runtime_ids: ["rt-fb1", "rt-fb2"],
+    });
+    const map = buildPresenceMap({
+      agents: [agent],
+      runtimes: [
+        makeRuntime({
+          id: "rt-main",
+          status: "offline",
+          last_seen_at: "2026-04-20T00:00:00Z",
+        }),
+        makeRuntime({ id: "rt-fb1", status: "offline", last_seen_at: "2026-04-20T00:00:00Z" }),
+        makeRuntime({ id: "rt-fb2", status: "online" }),
+      ],
+      snapshot: [],
+      now: NOW,
+    });
+    expect(map.get("a")?.availability).toBe("online");
+  });
+
+  it("stays offline when the main and every fallback are long-offline", () => {
+    const agent = makeAgent({
+      id: "a",
+      runtime_id: "rt-main",
+      fallback_runtime_ids: ["rt-fb1", "rt-missing"],
+    });
+    const map = buildPresenceMap({
+      agents: [agent],
+      runtimes: [
+        makeRuntime({
+          id: "rt-main",
+          status: "offline",
+          last_seen_at: "2026-04-20T00:00:00Z",
+        }),
+        // rt-fb1 recently lost → the best availability is "unstable",
+        // never "online"; rt-missing (deleted machine) contributes nothing.
+        makeRuntime({
+          id: "rt-fb1",
+          status: "offline",
+          last_seen_at: "2026-04-27T11:59:00Z",
+        }),
+      ],
+      snapshot: [],
+      now: NOW,
+    });
+    expect(map.get("a")?.availability).toBe("unstable");
+  });
 });

@@ -7,9 +7,10 @@ import (
 )
 
 // AgentReadiness reports whether an agent can accept new work right now.
-// "Ready" means archived_at IS NULL, runtime_id IS NOT NULL, and the bound
-// runtime's status is 'online'. When not ready, reason describes which gate
-// failed in language suitable for autopilot_run.failure_reason.
+// "Ready" means archived_at IS NULL, runtime_id IS NOT NULL, and at least one
+// of the agent's bound runtimes (main or a configured fallback) is 'online'.
+// When not ready, reason describes which gate failed in language suitable
+// for autopilot_run.failure_reason.
 //
 // err is non-nil only on DB lookup failure for the runtime row. Callers that
 // treat a transient DB error as "do not skip" (the autopilot admission gate)
@@ -32,12 +33,16 @@ func AgentReadiness(ctx context.Context, q *db.Queries, agent db.Agent) (ready b
 	if !agent.RuntimeID.Valid {
 		return false, "agent has no runtime bound", nil
 	}
-	rt, err := q.GetAgentRuntime(ctx, agent.RuntimeID)
+	// Fallback-aware: the agent is ready when ANY of its bound runtimes
+	// (main or fallback) is online — dispatch will pin new work to the
+	// resolved online runtime, so an offline main with a live fallback
+	// must not gate the run.
+	resolved, err := ResolveDispatchRuntime(ctx, q, agent.ID)
 	if err != nil {
 		return false, "", err
 	}
-	if rt.Status != "online" {
-		return false, "agent runtime is " + rt.Status, nil
+	if !resolved.Online {
+		return false, "agent runtime is offline", nil
 	}
 	return true, "", nil
 }

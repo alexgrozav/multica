@@ -609,6 +609,19 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	// Global middleware
 	r.Use(chimw.RequestID)
 	r.Use(middleware.ClientMetadata)
+	// X-Local-Daemon-ID: dispatch-routing hint identifying the daemon on the
+	// computer the request came from (sent by the desktop app, absent on
+	// web). Task enqueue paths prefer an online runtime on that machine when
+	// picking among the agent's bound runtimes. A hint, never authorization —
+	// see service.HeaderLocalDaemonID.
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			if v := strings.TrimSpace(req.Header.Get(service.HeaderLocalDaemonID)); v != "" {
+				req = req.WithContext(service.WithPreferredDaemonID(req.Context(), v))
+			}
+			next.ServeHTTP(w, req)
+		})
+	})
 	r.Use(middleware.RequestLogger)
 	if opts.HTTPMetrics != nil {
 		r.Use(opts.HTTPMetrics.Middleware)
@@ -627,7 +640,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   origins,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Workspace-ID", "X-Workspace-Slug", "X-Request-ID", "X-Agent-ID", "X-Task-ID", "X-CSRF-Token", "X-Client-Platform", "X-Client-Version", "X-Client-OS"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Workspace-ID", "X-Workspace-Slug", "X-Request-ID", "X-Agent-ID", "X-Task-ID", "X-CSRF-Token", "X-Client-Platform", "X-Client-Version", "X-Client-OS", service.HeaderLocalDaemonID},
 		AllowCredentials: true,
 		MaxAge:           300,
 	}))

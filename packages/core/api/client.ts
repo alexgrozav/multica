@@ -288,6 +288,7 @@ export class PreviewUnsupportedError extends Error {
 export class ApiClient {
   private baseUrl: string;
   private token: string | null = null;
+  private localDaemonId: string | null = null;
   private logger: Logger;
   private options: ApiClientOptions;
 
@@ -303,6 +304,15 @@ export class ApiClient {
 
   setToken(token: string | null) {
     this.token = token;
+  }
+
+  /** Reports the daemon running on THIS computer (desktop app only — web
+   *  has no local daemon). Sent as X-Local-Daemon-ID on every request so
+   *  task dispatch can prefer the current computer when picking among an
+   *  agent's bound runtimes. A routing hint, never authorization — see
+   *  service.HeaderLocalDaemonID on the server. */
+  setLocalDaemonId(daemonId: string | null) {
+    this.localDaemonId = daemonId && daemonId.trim() !== "" ? daemonId : null;
   }
 
   private readCsrfToken(): string | null {
@@ -324,6 +334,7 @@ export class ApiClient {
     if (id?.platform) headers["X-Client-Platform"] = id.platform;
     if (id?.version) headers["X-Client-Version"] = id.version;
     if (id?.os) headers["X-Client-OS"] = id.os;
+    if (this.localDaemonId) headers["X-Local-Daemon-ID"] = this.localDaemonId;
     return headers;
   }
 

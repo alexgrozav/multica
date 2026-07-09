@@ -29,7 +29,14 @@ func (m *Module) Run(ctx context.Context) {
 
 func (m *Module) pollOnce(ctx context.Context) {
 	for _, wsID := range m.workspaces() {
-		m.reconcileOnce(ctx, wsID)
+		// Reconcile MUST land before this process's first claim in a
+		// workspace: it resets orphans a previous life of this daemon left
+		// behind (initializing worktrees, running runs, half-done cleanups),
+		// and doing that after new claims exist would reset LIVE work. Skip
+		// the workspace this tick if reconcile can't be confirmed.
+		if !m.reconcileOnce(ctx, wsID) {
+			continue
+		}
 		resp, err := m.cl.poll(ctx, wsID)
 		if err != nil {
 			m.log().Debug("worktrees: poll failed", "workspace_id", wsID, "error", err)
@@ -139,18 +146,23 @@ func (m *Module) workspaces() []string {
 	return m.deps.ListWorkspaces()
 }
 
-// reconcileOnce resets this daemon's stale 'running' runs for a workspace the
-// first time the poll loop sees it after (re)start. At that moment no run is
-// live in this process, so any DB row still marked 'running' is an orphan from a
-// previous process — leaving it would wedge Stop/Run for that script forever.
-func (m *Module) reconcileOnce(ctx context.Context, wsID string) {
-	if _, done := m.reconciled.LoadOrStore(wsID, true); done {
-		return
+// reconcileOnce resets this daemon's stale claims for a workspace the first
+// time the poll loop sees it after (re)start: orphaned 'running' runs,
+// worktrees wedged in 'initializing', and cleanups that died mid-flight. At
+// that moment nothing is live in this process, so everything reset is an
+// orphan of a previous life. Returns false while the reconcile has not yet
+// succeeded — the caller must NOT claim jobs in that workspace until it has,
+// or a later retry would reset work this process started in the meantime.
+func (m *Module) reconcileOnce(ctx context.Context, wsID string) bool {
+	if _, done := m.reconciled.Load(wsID); done {
+		return true
 	}
 	if err := m.cl.reconcile(ctx, wsID); err != nil {
 		m.log().Debug("worktrees: reconcile failed", "workspace_id", wsID, "error", err)
-		m.reconciled.Delete(wsID) // retry on the next poll
+		return false // retry on the next poll
 	}
+	m.reconciled.Store(wsID, true)
+	return true
 }
 
 // cancelRunsFor cancels every in-flight named run of a worktree and waits

@@ -436,7 +436,7 @@ func TestRequestSetupRerun(t *testing.T) {
 	}
 
 	// daemon claims a setup job (setup channel travels; script body does not)
-	actions, err := s.ClaimWorktreeActionJobs(ctx(), "daemon-1")
+	actions, err := s.ClaimWorktreeActionJobs(ctx(), "daemon-1", testWorkspaceID)
 	if err != nil {
 		t.Fatalf("ClaimWorktreeActionJobs: %v", err)
 	}
@@ -580,7 +580,7 @@ func TestReconcileResetsStaleRuns(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 	// simulate daemon restart reconciling the workspace.
-	if err := s.ResetRunningRuns(ctx(), "daemon-1", testWorkspaceID); err != nil {
+	if err := s.ReconcileDaemon(ctx(), "daemon-1", testWorkspaceID); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 	g, _ := s.Get(ctx(), w.ID)

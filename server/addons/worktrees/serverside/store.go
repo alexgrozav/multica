@@ -459,18 +459,35 @@ func (s *Store) DaemonOnline(ctx context.Context, wsID, daemonID string) (bool, 
 	return online, err
 }
 
-// ResetRunningRuns clears stale 'running' named-run rows for a daemon's
-// worktrees in a workspace back to 'stopped'. Called once per workspace when a
-// daemon (re)starts its poll loop: at that instant the daemon owns no live runs,
-// so any 'running' row is an orphan from a previous process (whose OS process
-// died with the daemon). Without this, a Stop would no-op forever and a re-run
-// would be refused (run already in progress).
-func (s *Store) ResetRunningRuns(ctx context.Context, daemonID, wsID string) error {
-	_, err := s.db.Exec(ctx,
+// ReconcileDaemon clears every stale claim a previous life of this daemon left
+// behind. Called once per workspace when a daemon (re)starts its poll loop —
+// at that instant this process runs no jobs, so anything the DB still shows as
+// owned-and-in-flight by this daemon id is an orphan of a dead process:
+//
+//   - 'running' named-run rows → 'stopped' (a Stop would no-op forever and a
+//     re-run would be refused otherwise);
+//   - 'initializing' worktrees → back to unowned 'pending', so the next poll
+//     re-claims and re-runs the checkout (the init goroutine died with the
+//     process; before this, such rows were wedged forever and every task on
+//     the issue timed out in the eager-checkout wait);
+//   - 'cleaning' worktrees with no queued action → pending_action='cleanup',
+//     so the removal that died mid-flight is retried.
+func (s *Store) ReconcileDaemon(ctx context.Context, daemonID, wsID string) error {
+	if _, err := s.db.Exec(ctx,
 		`UPDATE worktree_run wr SET run_status='stopped', pending_action='', updated_at=now()
 		 FROM issue_worktree iw
 		 WHERE wr.worktree_id=iw.id AND iw.workspace_id=$1 AND iw.owner_daemon_id=$2
-		   AND wr.run_status='running'`, wsID, daemonID)
+		   AND wr.run_status='running'`, wsID, daemonID); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(ctx,
+		`UPDATE issue_worktree SET status='pending', owner_daemon_id='', setup_task_id=NULL, updated_at=now()
+		 WHERE workspace_id=$1 AND owner_daemon_id=$2 AND status='initializing'`, wsID, daemonID); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(ctx,
+		`UPDATE issue_worktree SET pending_action='cleanup', updated_at=now()
+		 WHERE workspace_id=$1 AND owner_daemon_id=$2 AND status='cleaning' AND pending_action=''`, wsID, daemonID)
 	return err
 }
 
@@ -502,11 +519,26 @@ func (s *Store) IssueStatus(ctx context.Context, issueID, wsID string) (shared.I
 
 // ClaimInitJobs atomically claims unclaimed pending worktrees in the workspace
 // for this daemon and returns init jobs (carrying the identifier → branch name).
+//
+// It also RESCUES rows wedged in 'initializing' by a daemon that stopped
+// polling (crashed, reinstalled with a new id, machine gone): once the old
+// owner has been silent for 5 minutes — healthy daemons poll every ~2s — the
+// row is claimable again by any live daemon. Init is safe to re-run
+// elsewhere: no path has been reported yet, checkout is idempotent, and a
+// late report from the old owner is rejected by ReportStatus's owner guard.
+// Rows this daemon itself owns are excluded — its own orphans are reset by
+// ReconcileDaemon at loop start, and a live init must not be re-claimed.
 func (s *Store) ClaimInitJobs(ctx context.Context, daemonID, wsID string) ([]shared.Job, error) {
 	rows, err := s.db.Query(ctx,
 		`WITH claimed AS (
-		   SELECT id FROM issue_worktree
-		   WHERE workspace_id=$2 AND status='pending' AND owner_daemon_id=''
+		   SELECT id FROM issue_worktree iw
+		   WHERE iw.workspace_id=$2 AND (
+		     (iw.status='pending' AND iw.owner_daemon_id='')
+		     OR (iw.status='initializing' AND iw.owner_daemon_id <> $1 AND NOT EXISTS (
+		           SELECT 1 FROM worktree_daemon_seen s
+		           WHERE s.workspace_id=iw.workspace_id AND s.daemon_id=iw.owner_daemon_id
+		             AND s.last_seen_at > now() - interval '5 minutes'))
+		   )
 		   FOR UPDATE SKIP LOCKED
 		 )
 		 UPDATE issue_worktree iw SET owner_daemon_id=$1, status='initializing',
@@ -530,18 +562,35 @@ func (s *Store) ClaimInitJobs(ctx context.Context, daemonID, wsID string) ([]sha
 
 // ClaimWorktreeActionJobs atomically claims pending setup/cleanup actions on the
 // daemon's worktrees (run/stop live on worktree_run, claimed separately).
-func (s *Store) ClaimWorktreeActionJobs(ctx context.Context, daemonID string) ([]shared.Job, error) {
+//
+// It also RESCUES cleanups orphaned by a daemon that stopped polling: a
+// 'cleanup' action still queued on a dead daemon's row, or a row stuck in
+// 'cleaning' whose action was consumed but whose process died mid-removal.
+// Ownership transfers to the claiming daemon; its cleanup is best-effort (the
+// dead machine's files are out of reach — its own GC sweeps them), but the row
+// reaches 'removed' so reopening the issue can re-arm a fresh checkout instead
+// of wedging every future task. Setup actions are deliberately NOT rescued:
+// the worktree only exists on the dead machine, so re-running setup elsewhere
+// is meaningless — and RequestSetup already refuses when the owner is offline.
+func (s *Store) ClaimWorktreeActionJobs(ctx context.Context, daemonID, wsID string) ([]shared.Job, error) {
 	rows, err := s.db.Query(ctx,
 		`WITH claimed AS (
-		   SELECT id, pending_action AS act FROM issue_worktree
-		   WHERE owner_daemon_id=$1 AND pending_action IN ('setup','cleanup')
+		   SELECT id, CASE WHEN pending_action <> '' THEN pending_action ELSE 'cleanup' END AS act
+		   FROM issue_worktree iw
+		   WHERE (iw.owner_daemon_id=$1 AND iw.pending_action IN ('setup','cleanup'))
+		      OR (iw.workspace_id=$2 AND iw.owner_daemon_id <> $1
+		          AND (iw.pending_action='cleanup' OR (iw.status='cleaning' AND iw.pending_action=''))
+		          AND NOT EXISTS (
+		            SELECT 1 FROM worktree_daemon_seen s
+		            WHERE s.workspace_id=iw.workspace_id AND s.daemon_id=iw.owner_daemon_id
+		              AND s.last_seen_at > now() - interval '5 minutes'))
 		   FOR UPDATE SKIP LOCKED
 		 )
-		 UPDATE issue_worktree iw SET pending_action='', updated_at=now()
+		 UPDATE issue_worktree iw SET pending_action='', owner_daemon_id=$1, updated_at=now()
 		 FROM claimed WHERE iw.id=claimed.id
 		 RETURNING iw.id::text, iw.issue_id::text, iw.issue_identifier, iw.requested_branch, iw.workspace_id::text,
 		           iw.repo_url, iw.setup_task_id::text, claimed.act`,
-		daemonID)
+		daemonID, wsID)
 	if err != nil {
 		return nil, err
 	}

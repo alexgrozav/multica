@@ -71,7 +71,7 @@ func TestRequestedBranchFlowsToJobs(t *testing.T) {
 	if _, err := s.MarkCleanupForIssue(ctx(), issueID); err != nil {
 		t.Fatalf("mark cleanup: %v", err)
 	}
-	actions, err := s.ClaimWorktreeActionJobs(ctx(), daemonID)
+	actions, err := s.ClaimWorktreeActionJobs(ctx(), daemonID, testWorkspaceID)
 	if err != nil {
 		t.Fatalf("ClaimWorktreeActionJobs: %v", err)
 	}

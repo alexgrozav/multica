@@ -357,7 +357,7 @@ func (m *Module) handlePollJobs(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to claim init jobs")
 		return
 	}
-	actions, err := m.store.ClaimWorktreeActionJobs(r.Context(), daemonID)
+	actions, err := m.store.ClaimWorktreeActionJobs(r.Context(), daemonID, wsID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "failed to claim action jobs")
 		return
@@ -411,9 +411,11 @@ func (m *Module) handleFileOpResult(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleReconcile clears the daemon's stale 'running' runs on a workspace when
-// it (re)starts, so an orphaned run left by a previous daemon process is
-// re-runnable/stoppable again.
+// handleReconcile clears the daemon's stale claims on a workspace when it
+// (re)starts: orphaned 'running' runs become stoppable again, worktrees
+// wedged in 'initializing' by the dead process return to claimable 'pending',
+// and cleanups that died mid-removal are re-queued. Runs before the daemon's
+// first claim, so nothing it resets can be live.
 func (m *Module) handleReconcile(w http.ResponseWriter, r *http.Request) {
 	wsID := r.URL.Query().Get("workspace_id")
 	daemonID := r.URL.Query().Get("daemon_id")
@@ -425,7 +427,7 @@ func (m *Module) handleReconcile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, "forbidden")
 		return
 	}
-	if err := m.store.ResetRunningRuns(r.Context(), daemonID, wsID); err != nil {
+	if err := m.store.ReconcileDaemon(r.Context(), daemonID, wsID); err != nil {
 		writeErr(w, http.StatusInternalServerError, "failed to reconcile")
 		return
 	}

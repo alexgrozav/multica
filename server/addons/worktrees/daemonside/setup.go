@@ -30,7 +30,12 @@ type WaitParams struct {
 // or its setup failed (fail the task); a timeout is also a (managed) error.
 func WaitIssueReady(ctx context.Context, p WaitParams) (managed bool, err error) {
 	if p.Timeout <= 0 {
-		p.Timeout = 5 * time.Minute
+		// A COLD first checkout is a real clone plus the repo's Setup script
+		// (dependency install + build for a typical JS monorepo runs several
+		// minutes on its own); 5 minutes proved too tight in practice and
+		// failed otherwise-healthy first runs. Wedged rows no longer depend
+		// on this timeout to surface — the claim protocol self-heals them.
+		p.Timeout = 15 * time.Minute
 	}
 	if p.Poll <= 0 {
 		p.Poll = 2 * time.Second
